@@ -1,10 +1,13 @@
 """
 Daily attendance capture form for Marisol.
 
-UX principles:
-  - Show visually if there's already a saved record for each employee
-  - Make it obvious that re-saving overwrites previous values
-  - Common case (8h with 1h lunch) preset by default
+Designed for users with low computer literacy:
+  - State picker as horizontal radio "pills" with emoji, not a dropdown
+  - Contextual hint shown under the picker depending on selected state
+  - Quick-action guide visible at the top
+  - Pre-fills common case (9 AM - 7 PM with 1h lunch)
+  - Visual badges show which employees already have a saved record
+  - Same accent color per employee in their avatar
 """
 
 from __future__ import annotations
@@ -15,27 +18,36 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from . import sheets
+from .dashboard_html import color_for_name
 
 
 GT_TZ = ZoneInfo("America/Guatemala")
 
 
 STATUS_OPTIONS = [
-    ("working",    "Trabajando"),
-    ("day_off",    "Día libre"),
-    ("permission", "Permiso / Falta justificada"),
-    ("vacation",   "Vacaciones"),
-    ("sick",       "Incapacidad / Enfermedad"),
+    ("working",    "✅  Trabajando"),
+    ("day_off",    "💤  Día libre"),
+    ("permission", "📋  Permiso / No llegó"),
+    ("vacation",   "🏖️  Vacaciones"),
+    ("sick",       "🤒  Enfermo"),
 ]
 STATUS_LABEL = dict(STATUS_OPTIONS)
+STATUS_KEYS = [k for k, _ in STATUS_OPTIONS]
 
-# Badge color for each saved status (shown next to employee name)
 STATUS_BADGE_COLOR = {
     "working":    ("#1B7340", "#D1FADF", "TRABAJANDO"),
     "day_off":    ("#6C7280", "#E8EAEE", "DÍA LIBRE"),
     "permission": ("#1D4ED8", "#DBEAFE", "PERMISO"),
     "vacation":   ("#0891B2", "#CFFAFE", "VACACIONES"),
-    "sick":       ("#7C2D12", "#FECACA", "INCAPACIDAD"),
+    "sick":       ("#7C2D12", "#FECACA", "ENFERMO"),
+}
+
+STATUS_HINT = {
+    "working":    "Si llegó tarde o salió antes, ajusta las horas abajo. Lo demás queda igual.",
+    "day_off":    "Era su día de descanso programado (no le tocaba trabajar).",
+    "permission": "Úsalo cuando: fue al doctor, asunto familiar, no se presentó, o cualquier ausencia justificada. Anota el motivo.",
+    "vacation":   "Vacaciones acordadas previamente.",
+    "sick":       "Llamó por enfermedad o tiene incapacidad médica.",
 }
 
 
@@ -65,15 +77,50 @@ def _inject_css():
             color: #C9982A; font-weight: 600; margin-bottom: 2px;
         }
 
-        .cap-tip {
-            background: #FEF7E6; border: 1px solid #F0D78A;
+        .cap-guide {
+            background: #FFFFFF; border: 1px solid #D8DCE2;
             border-left: 3px solid #C9982A;
-            padding: 12px 16px; border-radius: 4px; margin-bottom: 20px;
-            font-size: 12.5px; color: #5C4515; line-height: 1.5;
+            padding: 16px 20px; border-radius: 4px; margin-bottom: 20px;
+            font-size: 13px; color: #3D4554; line-height: 1.7;
         }
-        .cap-tip strong { color: #0B0F19; }
+        .cap-guide strong { color: #0B0F19; }
+        .cap-guide .ttl {
+            font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+            color: #0B0F19; font-weight: 700; margin-bottom: 10px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .cap-guide ul { margin: 6px 0 4px 0; padding-left: 22px; }
+        .cap-guide li { margin-bottom: 4px; }
 
-        .emp-card-wrap { margin-bottom: 10px; }
+        .emp-card-wrap { margin-bottom: 6px; }
+
+        /* Streamlit's radio horizontal — make it look like pills */
+        div[role="radiogroup"] {
+            gap: 6px !important;
+            flex-wrap: wrap !important;
+        }
+        div[role="radiogroup"] label {
+            background: #F6F7F9;
+            border: 1px solid #D8DCE2;
+            border-radius: 4px;
+            padding: 6px 12px 6px 8px !important;
+            font-size: 12.5px !important;
+            font-weight: 500;
+            transition: all 0.12s ease;
+            cursor: pointer;
+        }
+        div[role="radiogroup"] label:hover {
+            border-color: #0B0F19;
+            background: #FFFFFF;
+        }
+        div[role="radiogroup"] label[data-checked="true"] {
+            background: #0B0F19 !important;
+            border-color: #0B0F19 !important;
+            color: #FFFFFF !important;
+        }
+        div[role="radiogroup"] label[data-checked="true"] p {
+            color: #FFFFFF !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -109,33 +156,34 @@ def _format_date_helper(d):
     return ""
 
 
-def _render_badge(status_key: str, name: str, has_record: bool):
-    """Render an employee name + status badge."""
+def _render_emp_card(status_key, name, has_record):
+    """Render an employee name + status badge in a card."""
     initials = "".join([p[0] for p in name.split()[:2]]).upper() or "?"
+    fg, bg = color_for_name(name)
+
     if has_record:
-        color, bg, label = STATUS_BADGE_COLOR.get(status_key, STATUS_BADGE_COLOR["day_off"])
+        color, bg_badge, label = STATUS_BADGE_COLOR.get(status_key, STATUS_BADGE_COLOR["day_off"])
         badge_html = (
             f'<span style="display:inline-block;padding:3px 8px;border-radius:3px;'
-            f'background:{bg};color:{color};font-size:9.5px;font-weight:700;'
+            f'background:{bg_badge};color:{color};font-size:9.5px;font-weight:700;'
             f'letter-spacing:1.5px;margin-left:10px;vertical-align:middle;">✓ {label}</span>'
         )
-        guide = '<span style="font-size:10.5px;color:#6C7280;margin-left:10px;">' \
-                'modifica abajo para actualizar</span>'
+        guide = 'modifica abajo si necesitas actualizar'
     else:
         badge_html = (
             '<span style="display:inline-block;padding:3px 8px;border-radius:3px;'
             'background:#FEE4E2;color:#B42318;font-size:9.5px;font-weight:700;'
             'letter-spacing:1.5px;margin-left:10px;vertical-align:middle;">SIN REGISTRO</span>'
         )
-        guide = ''
+        guide = 'selecciona el estado del día y guarda'
 
     return (
         '<div style="background:#fff;border:1px solid #D8DCE2;border-radius:6px;'
-        'padding:14px 18px;margin-bottom:0;display:flex;align-items:center;gap:12px;">'
-        f'<div style="width:36px;height:36px;border-radius:50%;background:#F6F7F9;'
-        f'color:#3D4554;display:grid;place-items:center;font-weight:600;font-size:12px;'
-        f'border:1px solid #D8DCE2;font-family:Geist Mono,monospace;flex-shrink:0;">'
-        f'{initials}</div>'
+        'padding:14px 18px;display:flex;align-items:center;gap:12px;">'
+        f'<div style="width:38px;height:38px;border-radius:50%;background:{bg};'
+        f'color:{fg};display:grid;place-items:center;font-weight:700;font-size:12.5px;'
+        f'border:1px solid {bg};font-family:Geist Mono,monospace;flex-shrink:0;'
+        f'letter-spacing:0.3px;">{initials}</div>'
         f'<div style="flex:1;"><div style="font-weight:600;font-size:14px;color:#0B0F19;'
         f'letter-spacing:-0.1px;">{name}{badge_html}</div>'
         f'<div style="font-size:11px;color:#6C7280;margin-top:2px;">{guide}</div></div>'
@@ -146,7 +194,7 @@ def _render_badge(status_key: str, name: str, has_record: bool):
 def render(current_user: dict) -> None:
     _inject_css()
 
-    # Header strip
+    # Header
     st.markdown(
         f"""
         <div class="cap-header">
@@ -163,21 +211,29 @@ def render(current_user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # Tip banner — explains the correction flow clearly
+    # Quick-action guide
     st.markdown(
         """
-        <div class="cap-tip">
-        💡 <strong>¿Cómo corregir un registro?</strong> Si un empleado no llegó,
-        se fue temprano, o cambió algo durante el día — solo selecciona la
-        misma fecha y tienda, cambia el <strong>estado</strong> (ej. de
-        <em>Trabajando</em> a <em>Permiso</em>), agrega una nota explicativa
-        y guarda. Los datos del mismo empleado/fecha se sobrescriben automáticamente.
+        <div class="cap-guide">
+          <div class="ttl">💡 Guía rápida — Cómo registrar cada caso</div>
+          <ul>
+            <li><strong>Trabajando normal:</strong> selecciona <strong>✅ Trabajando</strong>, ajusta horas si es necesario.</li>
+            <li><strong>Llegó tarde:</strong> mantén <strong>✅ Trabajando</strong> y marca <em>"Llegada tarde"</em> abajo.</li>
+            <li><strong>Salió antes:</strong> mantén <strong>✅ Trabajando</strong> y cambia la hora de <em>Salida</em>.</li>
+            <li><strong>No llegó / fue al doctor / asunto personal:</strong> selecciona <strong>📋 Permiso</strong> y escribe el motivo.</li>
+            <li><strong>Enfermo / incapacidad:</strong> selecciona <strong>🤒 Enfermo</strong>.</li>
+            <li><strong>Día libre / descanso programado:</strong> selecciona <strong>💤 Día libre</strong>.</li>
+            <li><strong>Vacaciones:</strong> selecciona <strong>🏖️ Vacaciones</strong>.</li>
+          </ul>
+          <div style="margin-top:8px;font-size:12px;color:#6C7280;">
+            <strong>Para corregir un registro ya guardado:</strong> cambia los valores y vuelve a guardar.
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # ── Date + store selectors ──────────────────────────────────────
+    # Date + store selectors
     col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
@@ -195,7 +251,7 @@ def render(current_user: dict) -> None:
         stores = sheets.get_stores()
         employees = sheets.get_employees()
     except Exception as e:
-        st.error(f"No se pudieron cargar empleados/tiendas desde Google Sheets: `{e}`")
+        st.error(f"No se pudieron cargar empleados/tiendas: `{e}`")
         return
 
     if not stores:
@@ -226,7 +282,6 @@ def render(current_user: dict) -> None:
             sheets.get_stores.clear()
             st.rerun()
 
-    # Existing records for that date
     try:
         existing = sheets.get_attendance_for_date(date.isoformat())
     except Exception as e:
@@ -234,7 +289,6 @@ def render(current_user: dict) -> None:
         return
     existing_by_emp = {r["employee_id"]: r for r in existing}
 
-    # Employees in selected store
     store_emps = [e for e in employees if e["store_id"] == selected_store_id]
     if not store_emps:
         st.info(
@@ -243,12 +297,11 @@ def render(current_user: dict) -> None:
         )
         return
 
-    # Count summary
     saved_count = sum(1 for emp in store_emps if emp["id"] in existing_by_emp)
 
     st.markdown(
         f"<div style='margin:18px 0 12px;display:flex;justify-content:space-between;"
-        f"align-items:baseline;'>"
+        f"align-items:baseline;flex-wrap:wrap;gap:8px;'>"
         f"<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
         f"color:#6C7280;font-weight:600;'>"
         f"{len(store_emps)} empleados · {store_labels[selected_store_id]}</div>"
@@ -260,7 +313,6 @@ def render(current_user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Per-employee form ──────────────────────────────────────────
     pending = []
 
     for emp in store_emps:
@@ -268,24 +320,39 @@ def render(current_user: dict) -> None:
         has_record = bool(existing_rec)
         prev_status = existing_rec.get("status", "working")
         status_idx = next(
-            (i for i, (k, _) in enumerate(STATUS_OPTIONS) if k == prev_status), 0
+            (i for i, k in enumerate(STATUS_KEYS) if k == prev_status), 0
         )
 
         st.markdown('<div class="emp-card-wrap">', unsafe_allow_html=True)
         st.markdown(
-            _render_badge(prev_status if has_record else "", emp["name"], has_record),
+            _render_emp_card(prev_status if has_record else "", emp["name"], has_record),
             unsafe_allow_html=True,
         )
 
-        cols = st.columns([2, 5])
-        with cols[0]:
-            status_choice = st.selectbox(
-                "Estado",
-                [k for k, _ in STATUS_OPTIONS],
-                format_func=lambda k: STATUS_LABEL[k],
-                index=status_idx,
-                key=f"status_{emp['id']}",
-            )
+        # Horizontal radio for state — much more visual than a dropdown
+        st.markdown(
+            "<div style='margin: 12px 0 4px; font-size: 11px; letter-spacing: 1.5px; "
+            "text-transform: uppercase; color: #6C7280; font-weight: 600;'>"
+            "Estado del día</div>",
+            unsafe_allow_html=True,
+        )
+        status_choice = st.radio(
+            "Estado del día",
+            STATUS_KEYS,
+            format_func=lambda k: STATUS_LABEL[k],
+            index=status_idx,
+            horizontal=True,
+            label_visibility="collapsed",
+            key=f"status_{emp['id']}",
+        )
+
+        # Contextual hint
+        st.markdown(
+            f"<div style='margin:-4px 0 12px;font-size:11.5px;color:#3D4554;"
+            f"font-style:italic;padding-left:4px;'>"
+            f"<span style='color:#C9982A;'>ℹ</span> {STATUS_HINT[status_choice]}</div>",
+            unsafe_allow_html=True,
+        )
 
         record = {
             "date": date.isoformat(),
@@ -301,91 +368,92 @@ def render(current_user: dict) -> None:
             "notes": "",
         }
 
-        with cols[1]:
-            if status_choice == "working":
-                d_ss = dt.time(10, 0)
-                d_se = dt.time(19, 0)
-                d_ls = dt.time(13, 0)
-                d_le = dt.time(14, 0)
+        if status_choice == "working":
+            d_ss = dt.time(9, 0)
+            d_se = dt.time(19, 0)
+            d_ls = dt.time(13, 0)
+            d_le = dt.time(14, 0)
 
-                sc = st.columns(4)
-                ss_t = sc[0].time_input(
-                    "Entrada",
-                    value=_parse_t(existing_rec.get("shift_start"), d_ss),
-                    key=f"ss_{emp['id']}", step=1800,
-                )
-                se_t = sc[1].time_input(
-                    "Salida",
-                    value=_parse_t(existing_rec.get("shift_end"), d_se),
-                    key=f"se_{emp['id']}", step=1800,
-                )
-                ls_t = sc[2].time_input(
-                    "Almuerzo desde",
-                    value=_parse_t(existing_rec.get("lunch_start"), d_ls),
-                    key=f"ls_{emp['id']}", step=1800,
-                )
-                le_t = sc[3].time_input(
-                    "Almuerzo hasta",
-                    value=_parse_t(existing_rec.get("lunch_end"), d_le),
-                    key=f"le_{emp['id']}", step=1800,
-                )
+            sc = st.columns(4)
+            ss_t = sc[0].time_input(
+                "🕘 Entrada",
+                value=_parse_t(existing_rec.get("shift_start"), d_ss),
+                key=f"ss_{emp['id']}", step=1800,
+            )
+            se_t = sc[1].time_input(
+                "🕖 Salida",
+                value=_parse_t(existing_rec.get("shift_end"), d_se),
+                key=f"se_{emp['id']}", step=1800,
+            )
+            ls_t = sc[2].time_input(
+                "🍽 Almuerzo desde",
+                value=_parse_t(existing_rec.get("lunch_start"), d_ls),
+                key=f"ls_{emp['id']}", step=1800,
+            )
+            le_t = sc[3].time_input(
+                "🍽 Almuerzo hasta",
+                value=_parse_t(existing_rec.get("lunch_end"), d_le),
+                key=f"le_{emp['id']}", step=1800,
+            )
 
-                extra_cols = st.columns([1, 1, 2])
-                ot = extra_cols[0].number_input(
-                    "Hora extra (min)", min_value=0, max_value=600, step=15,
-                    value=int(existing_rec.get("overtime_minutes") or 0),
-                    key=f"ot_{emp['id']}",
-                )
-                is_late = extra_cols[1].checkbox(
-                    "Llegada tarde",
-                    value=bool(existing_rec.get("is_late", False)),
-                    key=f"late_{emp['id']}",
-                )
-                actual_start_t = None
-                if is_late:
-                    actual_start_t = extra_cols[2].time_input(
-                        "Hora real de llegada",
-                        value=_parse_t(existing_rec.get("actual_start"), ss_t),
-                        key=f"actstart_{emp['id']}", step=900,
-                    )
-
-                notes_val = st.text_input(
-                    "Notas (opcional)",
-                    value=existing_rec.get("notes", ""),
-                    key=f"notes_w_{emp['id']}",
-                    placeholder="Ej. Llegó tarde por tráfico",
+            extra_cols = st.columns([1, 1, 2])
+            ot = extra_cols[0].number_input(
+                "⏰ Hora extra (min)", min_value=0, max_value=600, step=15,
+                value=int(existing_rec.get("overtime_minutes") or 0),
+                key=f"ot_{emp['id']}",
+            )
+            is_late = extra_cols[1].checkbox(
+                "Llegada tarde",
+                value=bool(existing_rec.get("is_late", False)),
+                key=f"late_{emp['id']}",
+            )
+            actual_start_t = None
+            if is_late:
+                actual_start_t = extra_cols[2].time_input(
+                    "Hora real de llegada",
+                    value=_parse_t(existing_rec.get("actual_start"), ss_t),
+                    key=f"actstart_{emp['id']}", step=900,
                 )
 
-                record.update({
-                    "shift_start": _time_or_none(ss_t),
-                    "shift_end": _time_or_none(se_t),
-                    "lunch_start": _time_or_none(ls_t),
-                    "lunch_end": _time_or_none(le_t),
-                    "overtime_minutes": int(ot),
-                    "is_late": bool(is_late),
-                    "actual_start": _time_or_none(actual_start_t) if is_late else None,
-                    "notes": notes_val,
-                })
-            else:
-                placeholder_map = {
-                    "day_off": "Ej. Descanso semanal acordado",
-                    "permission": "Ej. Fue al doctor · Cita médica · Asunto familiar",
-                    "vacation": "Ej. Vacaciones programadas",
-                    "sick": "Ej. Enfermedad respiratoria · Reposo médico 3 días",
-                }
-                record["notes"] = st.text_input(
-                    "Nota / Motivo",
-                    value=existing_rec.get("notes", ""),
-                    key=f"notes_a_{emp['id']}",
-                    placeholder=placeholder_map.get(status_choice, ""),
-                )
+            notes_val = st.text_input(
+                "📝 Notas (opcional)",
+                value=existing_rec.get("notes", ""),
+                key=f"notes_w_{emp['id']}",
+                placeholder="Ej. Llegó tarde por tráfico · Salió temprano por cita",
+            )
+
+            record.update({
+                "shift_start": _time_or_none(ss_t),
+                "shift_end": _time_or_none(se_t),
+                "lunch_start": _time_or_none(ls_t),
+                "lunch_end": _time_or_none(le_t),
+                "overtime_minutes": int(ot),
+                "is_late": bool(is_late),
+                "actual_start": _time_or_none(actual_start_t) if is_late else None,
+                "notes": notes_val,
+            })
+        else:
+            placeholder_map = {
+                "day_off":    "Ej. Descanso semanal programado",
+                "permission": "Ej. Fue al doctor · Cita médica · Asunto familiar · No se presentó",
+                "vacation":   "Ej. Vacaciones programadas (inicio: X / fin: Y)",
+                "sick":       "Ej. Gripe · Incapacidad por 3 días · Cita médica",
+            }
+            record["notes"] = st.text_input(
+                "📝 Motivo / Nota",
+                value=existing_rec.get("notes", ""),
+                key=f"notes_a_{emp['id']}",
+                placeholder=placeholder_map.get(status_choice, ""),
+            )
 
         pending.append(record)
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<hr style='margin:18px 0 18px;border:none;border-top:1px solid #EBEEF2;'>",
+            unsafe_allow_html=True,
+        )
 
-    # ── Save ────────────────────────────────────────────────────────
-    st.markdown("---")
+    # Save
     save_cols = st.columns([3, 1])
     with save_cols[1]:
         if st.button(
@@ -401,7 +469,6 @@ def render(current_user: dict) -> None:
                     f"· {store_labels[selected_store_id]} · {date.isoformat()}"
                 )
                 st.balloons()
-                # Force a refresh so badges show the updated state
                 sheets.get_attendance_for_date.clear()
             except Exception as e:
                 st.error(f"Error al guardar: `{e}`")
@@ -409,5 +476,5 @@ def render(current_user: dict) -> None:
     with save_cols[0]:
         st.caption(
             "Se guardarán **todos** los registros mostrados arriba. "
-            "Modificar y volver a guardar **sobrescribe** los datos del mismo empleado/fecha."
+            "Volver a guardar **sobrescribe** los datos del mismo empleado/fecha."
         )
