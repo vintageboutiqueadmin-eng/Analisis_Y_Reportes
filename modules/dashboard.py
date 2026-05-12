@@ -158,58 +158,60 @@ def render(current_user: dict) -> None:
             height: auto !important;
         }
 
-        /* === SIDEBAR TOGGLE BUTTONS — high contrast gold in both states === */
+        /* === SIDEBAR TOGGLE BUTTONS — gold w/ white arrows in BOTH states === */
+        /* Broad coverage: catches the toggle regardless of Streamlit version */
 
-        /* COLLAPSED state: button floats over the black topbar */
+        header[data-testid="stHeader"] button,
         [data-testid="collapsedControl"],
         [data-testid="stSidebarCollapsedControl"],
-        button[kind="headerNoPadding"][aria-label*="idebar"] {
-            visibility: visible !important;
-            opacity: 1 !important;
-            z-index: 9999 !important;
+        [data-testid="stSidebarCollapseButton"],
+        button[kind="header"],
+        button[kind="headerNoPadding"],
+        button[aria-label*="idebar" i],
+        button[aria-label*="enu" i]:not(#MainMenu),
+        section[data-testid="stSidebar"] button[kind="header"],
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] {
             background: #C9982A !important;
             color: #FFFFFF !important;
             border: none !important;
             border-radius: 4px !important;
             box-shadow: 0 2px 10px rgba(0,0,0,0.35) !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            z-index: 9999 !important;
             padding: 6px 8px !important;
-        }
-        [data-testid="collapsedControl"] svg,
-        [data-testid="stSidebarCollapsedControl"] svg,
-        button[kind="headerNoPadding"][aria-label*="idebar"] svg {
-            color: #FFFFFF !important;
-            fill: #FFFFFF !important;
-            stroke: #FFFFFF !important;
-            stroke-width: 2 !important;
-            width: 20px !important;
-            height: 20px !important;
-        }
-        [data-testid="collapsedControl"]:hover,
-        [data-testid="stSidebarCollapsedControl"]:hover {
-            background: #A37D1F !important;
-            transform: scale(1.05);
+            transition: all 0.15s ease !important;
         }
 
-        /* EXPANDED state: button lives inside the white sidebar */
-        section[data-testid="stSidebar"] button[kind="header"],
-        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
-        section[data-testid="stSidebar"] button[aria-label*="lose"],
-        section[data-testid="stSidebar"] button[aria-label*="errar"] {
-            background: #C9982A !important;
-            border: none !important;
-            border-radius: 4px !important;
-            color: #FFFFFF !important;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.15) !important;
-        }
+        header[data-testid="stHeader"] button svg,
+        [data-testid="collapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg,
+        [data-testid="stSidebarCollapseButton"] svg,
+        button[kind="header"] svg,
+        button[kind="headerNoPadding"] svg,
+        button[aria-label*="idebar" i] svg,
         section[data-testid="stSidebar"] button[kind="header"] svg,
-        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg,
-        section[data-testid="stSidebar"] button[aria-label*="lose"] svg,
-        section[data-testid="stSidebar"] button[aria-label*="errar"] svg {
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg {
             color: #FFFFFF !important;
             fill: #FFFFFF !important;
             stroke: #FFFFFF !important;
-            stroke-width: 2 !important;
+            stroke-width: 2.5 !important;
+            width: 18px !important;
+            height: 18px !important;
+            opacity: 1 !important;
         }
+
+        header[data-testid="stHeader"] button:hover,
+        [data-testid="collapsedControl"]:hover,
+        [data-testid="stSidebarCollapsedControl"]:hover,
+        button[kind="header"]:hover,
+        button[kind="headerNoPadding"]:hover {
+            background: #A37D1F !important;
+            transform: scale(1.08);
+        }
+
+        /* But don't style the hamburger menu (#MainMenu is already hidden) */
+        #MainMenu, #MainMenu * { background: transparent !important; box-shadow: none !important; }
 
         .block-container {
             padding-top: 0 !important; padding-left: 0 !important;
