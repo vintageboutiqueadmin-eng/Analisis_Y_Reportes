@@ -321,7 +321,9 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
   transition: filter 0.15s ease; box-shadow: 0 1px 1px rgba(0,0,0,0.06); }
 .vb-bar:hover { filter: brightness(1.1); z-index: 5; }
 .vb-bar.working { background: linear-gradient(180deg, var(--working) 0%, var(--working-2) 100%); }
-.vb-bar.lunch { background: linear-gradient(180deg, var(--lunch) 0%, var(--lunch-2) 100%); }
+.vb-bar.lunch { background: linear-gradient(180deg, var(--lunch) 0%, var(--lunch-2) 100%);
+  font-size: 8.5px; padding: 0 4px; letter-spacing: 0.2px;
+  justify-content: center; }
 .vb-bar.overtime { background: linear-gradient(180deg, var(--overtime) 0%, var(--overtime-2) 100%);
   color: var(--ink); }
 .vb-bar.late-marker { background: var(--late); color: #FFF; }
@@ -532,7 +534,7 @@ def render_legend():
 # Timeline helpers
 # ---------------------------------------------------------------------------
 
-def compute_timeline_range(employees_by_store, default_start_hour=9, default_end_hour=19):
+def compute_timeline_range(employees_by_store, default_start_hour=5, default_end_hour=22):
     earliest = default_start_hour * 60
     latest = default_end_hour * 60
     for store in employees_by_store.values():
@@ -581,6 +583,30 @@ def pct(minutes, start_h, end_h):
 
 
 # ---------------------------------------------------------------------------
+# Employee color assignment (deterministic by name)
+# ---------------------------------------------------------------------------
+
+EMPLOYEE_COLORS = [
+    ("#1B7340", "#D1FADF"),  # forest green
+    ("#1D4ED8", "#DBEAFE"),  # royal blue
+    ("#B5390C", "#FEE4D6"),  # terracotta
+    ("#6D28D9", "#EDE9FE"),  # purple
+    ("#0891B2", "#CFFAFE"),  # cyan
+    ("#C9982A", "#FEF3C7"),  # gold
+    ("#BE185D", "#FCE7F3"),  # magenta
+    ("#047857", "#D1FAE5"),  # emerald
+    ("#4338CA", "#E0E7FF"),  # indigo
+    ("#9F1239", "#FECDD3"),  # rose
+]
+
+
+def color_for_name(name):
+    """Return (foreground, background) tuple — same color every time for the same name."""
+    h = sum(ord(c) for c in (name or "").upper())
+    return EMPLOYEE_COLORS[h % len(EMPLOYEE_COLORS)]
+
+
+# ---------------------------------------------------------------------------
 # Render: employee row
 # ---------------------------------------------------------------------------
 
@@ -588,6 +614,8 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
     name = emp.get("name", "")
     initials = "".join([p[0] for p in name.split()[:2]]).upper() or "?"
     status = emp.get("status", "working")
+    fg_color, bg_color = color_for_name(name)
+    avatar_style = f"background:{bg_color};color:{fg_color};border-color:{bg_color};"
 
     total_hours = end_h - start_h
     half_step = f"calc((100% / {total_hours * 2}))"
@@ -640,13 +668,20 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
                     )
                 left = pct(ls, start_h, end_h)
                 width = pct(le, start_h, end_h) - left
+                # Adaptive label: short bars get shorter/no text
+                if width >= 4.5:
+                    lunch_label = "Almuerzo"
+                elif width >= 2.5:
+                    lunch_label = "Alm"
+                else:
+                    lunch_label = ""
                 bars_html.append(
-                    f'<div class="vb-bar lunch" style="left: {left:.2f}%; width: {width:.2f}%;">Almuerzo</div>'
+                    f'<div class="vb-bar lunch" style="left: {left:.2f}%; width: {width:.2f}%;">{lunch_label}</div>'
                 )
                 left = pct(le, start_h, end_h)
                 width = pct(se, start_h, end_h) - left
                 bars_html.append(
-                    f'<div class="vb-bar working" style="left: {left:.2f}%; width: {width:.2f}%;">Sale {fmt_time_12h(se)}</div>'
+                    f'<div class="vb-bar working" style="left: {left:.2f}%; width: {width:.2f}%; justify-content: flex-end;">Sale {fmt_time_12h(se)}</div>'
                 )
             else:
                 left = pct(effective_start, start_h, end_h)
@@ -667,7 +702,7 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
         return f"""
 <div class="vb-emp">
   <div class="vb-emp-info">
-    <div class="vb-avatar">{initials}</div>
+    <div class="vb-avatar" style="{avatar_style}">{initials}</div>
     <div class="vb-emp-meta">
       <div class="vb-emp-name">{name}</div>
       <div class="vb-emp-times">{''.join(time_line_parts)}</div>
@@ -696,7 +731,7 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
     return f"""
 <div class="vb-emp">
   <div class="vb-emp-info">
-    <div class="vb-avatar">{initials}</div>
+    <div class="vb-avatar" style="{avatar_style}">{initials}</div>
     <div class="vb-emp-meta">
       <div class="vb-emp-name">{name}</div>
       <div class="vb-emp-times">{sub_line}</div>
@@ -792,7 +827,7 @@ def render_dashboard_body(data, user_name="Lic. Juan Orozco", user_role="Gerenci
     foot = (
         '<div class="vb-foot">'
         '<div class="vb-foot-dot">· ✦ ·</div>'
-        '<div class="vb-foot-text">Vintage Boutique · Antigua Guatemala</div>'
+        '<div class="vb-foot-text">Vintage Boutique</div>'
         '</div>'
     )
 
