@@ -149,6 +149,12 @@ def render(current_user: dict) -> None:
         """
         <style>
         #MainMenu, header, footer { visibility: hidden; }
+        /* Override: keep the sidebar reopen button visible when collapsed */
+        button[data-testid="collapsedControl"],
+        button[data-testid="stSidebarCollapsedControl"] {
+            visibility: visible !important;
+            z-index: 999 !important;
+        }
         .block-container {
             padding-top: 0 !important; padding-left: 0 !important;
             padding-right: 0 !important; padding-bottom: 0 !important;
