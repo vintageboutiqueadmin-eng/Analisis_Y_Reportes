@@ -144,17 +144,31 @@ def _build_data(date: dt.date) -> dict:
 def render(current_user: dict) -> None:
     """Render the dashboard page in Streamlit."""
 
-    # Hide default Streamlit chrome and zero out container padding
+    # Hide default Streamlit chrome and zero out container padding.
+    # IMPORTANT: don't hide the header — it contains the sidebar reopen button.
+    # Instead, make it transparent so it doesn't compete visually with our topbar.
     st.markdown(
         """
         <style>
-        #MainMenu, header, footer { visibility: hidden; }
-        /* Override: keep the sidebar reopen button visible when collapsed */
-        button[data-testid="collapsedControl"],
-        button[data-testid="stSidebarCollapsedControl"] {
-            visibility: visible !important;
-            z-index: 999 !important;
+        #MainMenu, footer { visibility: hidden; }
+
+        /* Header transparent (not hidden) so the sidebar collapsed-button stays clickable */
+        header[data-testid="stHeader"] {
+            background: transparent !important;
+            height: auto !important;
         }
+        /* Sidebar collapse button — ensure it sits above our black topbar */
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"],
+        button[kind="header"] {
+            visibility: visible !important;
+            opacity: 1 !important;
+            z-index: 9999 !important;
+            background: rgba(255,255,255,0.95) !important;
+            border-radius: 4px !important;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+        }
+
         .block-container {
             padding-top: 0 !important; padding-left: 0 !important;
             padding-right: 0 !important; padding-bottom: 0 !important;
