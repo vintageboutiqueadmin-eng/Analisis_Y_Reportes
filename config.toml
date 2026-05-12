@@ -1,0 +1,80 @@
+# =============================================================================
+# Vintage Boutique — Plantilla de secrets
+# =============================================================================
+# INSTRUCCIONES:
+#   1. Copia este archivo como `secrets.toml` (sin el .example)
+#   2. Llena los valores reales
+#   3. NUNCA subas `secrets.toml` a GitHub — ya está en .gitignore
+#   4. En Streamlit Cloud: pega TODO el contenido en
+#      App settings → Secrets (la UI los guarda automáticamente)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 1. CUENTA DE SERVICIO DE GOOGLE (para acceso a Google Sheets)
+# -----------------------------------------------------------------------------
+# Cómo obtenerla:
+#   a. Ve a https://console.cloud.google.com/
+#   b. Crea un proyecto (o usa uno existente)
+#   c. Habilita "Google Sheets API" y "Google Drive API"
+#   d. IAM y administración → Cuentas de servicio → Crear cuenta de servicio
+#   e. Crea una clave JSON y descárgala
+#   f. Pega cada campo del JSON aquí abajo
+#   g. IMPORTANTE: Comparte tu Google Sheet con el `client_email` de abajo
+#      (dándole permisos de "Editor")
+[gcp_service_account]
+type = "service_account"
+project_id = "tu-proyecto-id"
+private_key_id = "abcdef1234567890abcdef1234567890abcdef12"
+private_key = """-----BEGIN PRIVATE KEY-----
+LINEAS_DE_LA_LLAVE_PRIVADA_AQUI
+-----END PRIVATE KEY-----
+"""
+client_email = "vintage-boutique-bot@tu-proyecto.iam.gserviceaccount.com"
+client_id = "123456789012345678901"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/vintage-boutique-bot%40tu-proyecto.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
+
+
+# -----------------------------------------------------------------------------
+# 2. GOOGLE SHEET
+# -----------------------------------------------------------------------------
+# Crea un Google Sheet nuevo y copia el ID de la URL:
+#   https://docs.google.com/spreadsheets/d/AQUI_ESTA_EL_ID/edit
+# Compártelo con el `client_email` de la cuenta de servicio (Editor).
+[sheets]
+spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFG"
+# Opcionalmente puedes renombrar las pestañas:
+# tab_employees   = "employees"
+# tab_stores      = "stores"
+# tab_attendance  = "attendance"
+
+
+# -----------------------------------------------------------------------------
+# 3. AUTORIZACIÓN POR ROL
+# -----------------------------------------------------------------------------
+# Lista los correos exactos que tendrán cada rol.
+# En Streamlit Cloud (app privada), el correo lo provee `st.user.email`
+# después de que el usuario inicia sesión con Google.
+[auth]
+admins   = [
+    "pablo.orozco@ejemplo.com",
+]
+managers = [
+    "marisol.caxaj@gmail.com",
+]
+viewers  = [
+    "juan.orozco@ejemplo.com",
+]
+
+
+# -----------------------------------------------------------------------------
+# 4. NOMBRES PARA MOSTRAR (opcional, mejora la UX)
+# -----------------------------------------------------------------------------
+[display_names]
+"pablo.orozco@ejemplo.com"   = "Pablo Orozco"
+"marisol.caxaj@gmail.com"    = "Marisol Caxaj"
+"juan.orozco@ejemplo.com"    = "Lic. Juan Orozco"
