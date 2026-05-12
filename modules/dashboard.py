@@ -157,16 +157,58 @@ def render(current_user: dict) -> None:
             background: transparent !important;
             height: auto !important;
         }
-        /* Sidebar collapse button — ensure it sits above our black topbar */
+
+        /* === SIDEBAR TOGGLE BUTTONS — high contrast gold in both states === */
+
+        /* COLLAPSED state: button floats over the black topbar */
         [data-testid="collapsedControl"],
         [data-testid="stSidebarCollapsedControl"],
-        button[kind="header"] {
+        button[kind="headerNoPadding"][aria-label*="idebar"] {
             visibility: visible !important;
             opacity: 1 !important;
             z-index: 9999 !important;
-            background: rgba(255,255,255,0.95) !important;
+            background: #C9982A !important;
+            color: #FFFFFF !important;
+            border: none !important;
             border-radius: 4px !important;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.35) !important;
+            padding: 6px 8px !important;
+        }
+        [data-testid="collapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg,
+        button[kind="headerNoPadding"][aria-label*="idebar"] svg {
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+            stroke: #FFFFFF !important;
+            stroke-width: 2 !important;
+            width: 20px !important;
+            height: 20px !important;
+        }
+        [data-testid="collapsedControl"]:hover,
+        [data-testid="stSidebarCollapsedControl"]:hover {
+            background: #A37D1F !important;
+            transform: scale(1.05);
+        }
+
+        /* EXPANDED state: button lives inside the white sidebar */
+        section[data-testid="stSidebar"] button[kind="header"],
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
+        section[data-testid="stSidebar"] button[aria-label*="lose"],
+        section[data-testid="stSidebar"] button[aria-label*="errar"] {
+            background: #C9982A !important;
+            border: none !important;
+            border-radius: 4px !important;
+            color: #FFFFFF !important;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15) !important;
+        }
+        section[data-testid="stSidebar"] button[kind="header"] svg,
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg,
+        section[data-testid="stSidebar"] button[aria-label*="lose"] svg,
+        section[data-testid="stSidebar"] button[aria-label*="errar"] svg {
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+            stroke: #FFFFFF !important;
+            stroke-width: 2 !important;
         }
 
         .block-container {
