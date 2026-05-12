@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import streamlit as st
+
+
+GT_TZ = ZoneInfo("America/Guatemala")
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +172,7 @@ def upsert_attendance(record: dict, updated_by: str) -> None:
             target_row = i
             break
 
-    now_iso = dt.datetime.now().isoformat(timespec="seconds")
+    now_iso = dt.datetime.now(GT_TZ).isoformat(timespec="seconds")
     row_values = [
         date_iso,
         emp_id,
