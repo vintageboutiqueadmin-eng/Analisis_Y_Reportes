@@ -1,17 +1,22 @@
 """
 Dashboard view for the Lic. Juan Orozco (and anyone with viewer access).
-Builds a `data` dict from Google Sheets and renders the executive HTML.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import locale
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
 from . import sheets
-from .dashboard_html import render_dashboard, parse_time
+from .dashboard_html import (
+    CSS, render_dashboard_body, parse_time,
+)
+
+
+# Guatemala is UTC-6, no DST. Streamlit Cloud runs UTC, so we must localize.
+GT_TZ = ZoneInfo("America/Guatemala")
 
 
 SPANISH_WEEKDAYS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
@@ -21,6 +26,15 @@ SPANISH_MONTHS = [
 ]
 
 
+def now_gt() -> dt.datetime:
+    """Current datetime in Guatemala timezone."""
+    return dt.datetime.now(GT_TZ)
+
+
+def today_gt() -> dt.date:
+    return now_gt().date()
+
+
 def _format_spanish_date(d: dt.date) -> str:
     wd = SPANISH_WEEKDAYS[d.weekday()]
     mo = SPANISH_MONTHS[d.month - 1]
@@ -28,15 +42,14 @@ def _format_spanish_date(d: dt.date) -> str:
 
 
 def _now_minutes_for(date: dt.date) -> int | None:
-    """Return current minutes-from-midnight if `date` is today, else None."""
-    today = dt.date.today()
-    if date == today:
-        n = dt.datetime.now()
+    """Return current minutes-from-midnight if `date` is today (GT time), else None."""
+    if date == today_gt():
+        n = now_gt()
         return n.hour * 60 + n.minute
     return None
 
 
-def _compute_stats(employees: list[dict], records_by_emp: dict, now_min: int | None) -> dict:
+def _compute_stats(employees, records_by_emp, now_min):
     total = len(employees)
     working = 0
     lunch = 0
@@ -47,16 +60,13 @@ def _compute_stats(employees: list[dict], records_by_emp: dict, now_min: int | N
         status = rec.get("status", "working") if rec else None
         if not rec or status == "working":
             if not rec:
-                # No record yet → counted as not assigned, treat as 'other'
                 continue
             ss = parse_time(rec.get("shift_start"))
             se = parse_time(rec.get("shift_end"))
             ls = parse_time(rec.get("lunch_start"))
             le = parse_time(rec.get("lunch_end"))
             ot = rec.get("overtime_minutes") or 0
-            # Determine current state
             if now_min is None:
-                # Past or future date — count as scheduled working
                 working += 1
             else:
                 end_with_ot = (se or 0) + ot
@@ -64,7 +74,6 @@ def _compute_stats(employees: list[dict], records_by_emp: dict, now_min: int | N
                     lunch += 1
                 elif ss is not None and end_with_ot and ss <= now_min < end_with_ot:
                     working += 1
-                # else: not yet on shift / already left → don't count as working
         elif status == "day_off":
             off += 1
         else:
@@ -88,7 +97,6 @@ def _build_data(date: dt.date) -> dict:
     now_min = _now_minutes_for(date)
     stats = _compute_stats(employees, records_by_emp, now_min)
 
-    # Group employees by store, then sort with workers first then absences
     stores_out = []
     for store in stores:
         store_emps = [e for e in employees if e["store_id"] == store["id"]]
@@ -96,7 +104,6 @@ def _build_data(date: dt.date) -> dict:
         for emp in store_emps:
             rec = records_by_emp.get(emp["id"])
             if not rec:
-                # No record for this date → treat as unscheduled (day_off)
                 rendered_emps.append({
                     "name": emp["name"],
                     "status": "day_off",
@@ -116,7 +123,6 @@ def _build_data(date: dt.date) -> dict:
                 "notes": rec.get("notes", ""),
             })
 
-        # Working employees first, then absences
         rendered_emps.sort(
             key=lambda e: (0 if e.get("status") == "working" else 1, e["name"])
         )
@@ -135,27 +141,26 @@ def _build_data(date: dt.date) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Streamlit entry point
-# ---------------------------------------------------------------------------
-
 def render(current_user: dict) -> None:
     """Render the dashboard page in Streamlit."""
-    # Hide default Streamlit chrome
+
+    # Hide default Streamlit chrome and zero out container padding
     st.markdown(
         """
         <style>
         #MainMenu, header, footer { visibility: hidden; }
-        .block-container { padding-top: 0 !important; padding-left: 0 !important;
-                           padding-right: 0 !important; padding-bottom: 0 !important;
-                           max-width: 100% !important; }
+        .block-container {
+            padding-top: 0 !important; padding-left: 0 !important;
+            padding-right: 0 !important; padding-bottom: 0 !important;
+            max-width: 100% !important;
+        }
         section[data-testid="stSidebar"] { background: #FFF; border-right: 1px solid #D8DCE2; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Sidebar — date picker + nav
+    # Sidebar
     with st.sidebar:
         st.markdown(
             "<div style='padding:18px 4px 8px;font-family:Geist,sans-serif;'>"
@@ -171,7 +176,7 @@ def render(current_user: dict) -> None:
         st.markdown("**Fecha**")
         selected_date = st.date_input(
             "Fecha a consultar",
-            value=st.session_state.get("dashboard_date", dt.date.today()),
+            value=st.session_state.get("dashboard_date", today_gt()),
             format="DD/MM/YYYY",
             label_visibility="collapsed",
         )
@@ -182,7 +187,7 @@ def render(current_user: dict) -> None:
             st.session_state.dashboard_date = selected_date - dt.timedelta(days=1)
             st.rerun()
         if col_b.button("Hoy", use_container_width=True):
-            st.session_state.dashboard_date = dt.date.today()
+            st.session_state.dashboard_date = today_gt()
             st.rerun()
         if st.button("Mañana →", use_container_width=True):
             st.session_state.dashboard_date = selected_date + dt.timedelta(days=1)
@@ -198,8 +203,9 @@ def render(current_user: dict) -> None:
         st.markdown("---")
         st.caption(f"Sesión: **{current_user['name']}**")
         st.caption(current_user["email"])
+        st.caption(f"Hora GT: {now_gt().strftime('%H:%M')}")
 
-    # Main body — render the HTML dashboard
+    # Main body
     try:
         data = _build_data(st.session_state.dashboard_date)
     except Exception as e:
@@ -214,5 +220,11 @@ def render(current_user: dict) -> None:
     role_label = {"admin": "Administración", "manager": "Gerencia de Tiendas",
                   "viewer": "Gerencia"}.get(current_user["role"], "Usuario")
 
-    html = render_dashboard(data, user_name=current_user["name"], user_role=role_label)
-    st.markdown(html, unsafe_allow_html=True)
+    # CRITICAL: inject CSS and body separately to avoid Streamlit markdown
+    # parser misinterpreting the large HTML block. st.html renders raw HTML
+    # without any markdown processing.
+    st.html(CSS)
+    body_html = render_dashboard_body(
+        data, user_name=current_user["name"], user_role=role_label
+    )
+    st.html(body_html)
