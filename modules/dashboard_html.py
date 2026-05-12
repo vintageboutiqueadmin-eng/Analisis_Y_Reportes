@@ -758,7 +758,9 @@ def render_store(title, marker, employees, start_h, end_h, now_minutes):
 # Render: full dashboard
 # ---------------------------------------------------------------------------
 
-def render_dashboard(data, user_name="Lic. Juan Orozco", user_role="Gerencia"):
+def render_dashboard_body(data, user_name="Lic. Juan Orozco", user_role="Gerencia"):
+    """Render only the HTML body (no CSS). For use with st.html() so Streamlit
+    doesn't try to markdown-parse the content."""
     date_display = data.get("date_display", "")
     now_minutes = data.get("now_minutes")
     stats = data.get("stats", {})
@@ -779,25 +781,34 @@ def render_dashboard(data, user_name="Lic. Juan Orozco", user_role="Gerencia"):
         for s in stores
     )
 
-    return f"""
-{CSS}
-<div class="vb-app">
-  {render_topbar(user_name, user_role)}
-  <div class="vb-container">
-    <div class="vb-page-head">
-      <div>
-        <div class="vb-eyebrow">Vista diaria</div>
-        <h1>Asistencia</h1>
-        <div class="vb-page-date">{date_display}</div>
-      </div>
-    </div>
-    {render_stats(stats)}
-    {render_legend()}
-    {stores_html}
-    <div class="vb-foot">
-      <div class="vb-foot-dot">· ✦ ·</div>
-      <div class="vb-foot-text">Vintage Boutique · Antigua Guatemala</div>
-    </div>
-  </div>
-</div>
-"""
+    page_head = (
+        '<div class="vb-page-head"><div>'
+        '<div class="vb-eyebrow">Vista diaria</div>'
+        '<h1>Asistencia</h1>'
+        f'<div class="vb-page-date">{date_display}</div>'
+        '</div></div>'
+    )
+
+    foot = (
+        '<div class="vb-foot">'
+        '<div class="vb-foot-dot">· ✦ ·</div>'
+        '<div class="vb-foot-text">Vintage Boutique · Antigua Guatemala</div>'
+        '</div>'
+    )
+
+    return (
+        '<div class="vb-app">'
+        + render_topbar(user_name, user_role)
+        + '<div class="vb-container">'
+        + page_head
+        + render_stats(stats)
+        + render_legend()
+        + stores_html
+        + foot
+        + '</div></div>'
+    )
+
+
+def render_dashboard(data, user_name="Lic. Juan Orozco", user_role="Gerencia"):
+    """Full dashboard HTML including CSS (for standalone preview generation)."""
+    return CSS + render_dashboard_body(data, user_name, user_role)
