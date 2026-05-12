@@ -1,6 +1,17 @@
 """
 Vintage Boutique — Sistema de Asistencia
-Entry point con auth gate + routing por rol.
+========================================
+
+Streamlit app with three role-based views:
+
+    Pablo   (admin)   → Dashboard + Captura + Administración
+    Marisol (manager) → Captura + Dashboard
+    Juan    (viewer)  → Solo Dashboard
+
+Auth is resolved against `[auth]` in `secrets.toml`.
+Deploy as a private app in Streamlit Cloud so `st.user.email` is populated
+automatically. For local development, a dev login screen lets you preview
+any role.
 """
 
 from __future__ import annotations
@@ -45,6 +56,7 @@ def render_unauthorised(email: str) -> None:
 
 
 def render_role_nav(user: dict) -> str:
+    """Top-bar nav with allowed pages. Returns the selected page key."""
     role = user["role"]
     pages = []
     if role == auth.ROLE_VIEWER:
@@ -63,6 +75,16 @@ def render_role_nav(user: dict) -> str:
 
     if not pages:
         return "dashboard"
+
+    # Render as horizontal radio (sticky at top)
+    st.markdown(
+        """
+        <style>
+        section[data-testid="stSidebar"] { display: block; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.markdown("**Navegación**")
@@ -90,14 +112,17 @@ def render_role_nav(user: dict) -> str:
 def main() -> None:
     user = auth.authenticate()
 
+    # Not logged in at all → show dev login form (production users come pre-authed)
     if user is None:
         auth.render_dev_login()
         return
 
+    # Logged in but no role configured
     if user["role"] is None:
         render_unauthorised(user["email"])
         return
 
+    # Render the right page
     page = render_role_nav(user)
     if page == "dashboard":
         dashboard.render(user)
