@@ -8,6 +8,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from . import sheets
 from .dashboard_html import (
@@ -144,6 +145,10 @@ def _build_data(date: dt.date) -> dict:
 def render(current_user: dict) -> None:
     """Render the dashboard page in Streamlit."""
 
+    # Auto-refresh every 60 seconds. Forces a re-run that will read fresh data
+    # from Google Sheets (the cache TTL is 15s so it always gets the latest).
+    refresh_count = st_autorefresh(interval=60_000, key="vb_dashboard_autorefresh")
+
     # Hide default Streamlit chrome and zero out container padding.
     # IMPORTANT: don't hide the header — it contains the sidebar reopen button.
     # Instead, make it transparent so it doesn't compete visually with our topbar.
@@ -267,7 +272,19 @@ def render(current_user: dict) -> None:
         st.markdown("---")
         st.caption(f"Sesión: **{current_user['name']}**")
         st.caption(current_user["email"])
-        st.caption(f"Hora GT: {now_gt().strftime('%H:%M')}")
+        st.markdown("---")
+        st.markdown(
+            "<div style='font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+            "color:#1B7340;font-weight:600;margin-bottom:4px;'>"
+            "<span style='display:inline-block;width:6px;height:6px;border-radius:50%;"
+            "background:#1B7340;margin-right:6px;animation:pulse 2s infinite;'></span>"
+            "Auto-refresco activo</div>"
+            "<style>@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }</style>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"⏱ Cada 1 minuto · Hora GT: **{now_gt().strftime('%H:%M:%S')}**")
+        if refresh_count > 0:
+            st.caption(f"↻ Actualizaciones automáticas: {refresh_count}")
 
     # Main body
     try:
