@@ -253,7 +253,7 @@ def render_dev_login():
 
     # 7) Footer
     st.markdown(
-        '<div class="vb-login-footer">Antigua Guatemala'
+        '<div class="vb-login-footer">Sistema de Asistencia'
         '<span class="vb-login-footer-dot">·</span>MMXXVI</div>',
         unsafe_allow_html=True,
     )
