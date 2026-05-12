@@ -1,120 +1,65 @@
 """
 Dashboard HTML renderer.
 
-Generates the attendance dashboard view as HTML/CSS.
-Designed as an executive analytics dashboard:
-- Clean light-gray background
-- Geist Sans typography (no decorative serifs)
-- Crisp white cards with subtle borders
-- Brand gold used sparingly (logo + overtime accent only)
-- Status colors are corporate, not playful
+Generates the attendance dashboard as HTML/CSS.
+
+Executive look:
+  - Cool light-gray background, no decorative serifs
+  - Geist Sans + Geist Mono typography
+  - Crisp white cards, subtle gold accent only on logo + overtime
+  - Inline SVG logo (no external assets)
+
+Responsive:
+  - Mobile (< 640px): timeline with horizontal scroll, sticky employee column
+  - Tablet (640-1023px): 3-col stats, compact spacing
+  - Desktop (1024-1599px): full 5-col layout, max 1480px wide
+  - Large TV (1600px+): wider container (1800px), bigger typography
 """
 
 from __future__ import annotations
 
-from typing import Iterable
-from datetime import datetime, time
+from datetime import time
 
 
-# Logo embedded as base64 (small JPEG, ~6KB) so it travels with the app.
-LOGO_B64 = (
-    "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"
-)
+# ---------------------------------------------------------------------------
+# Inline SVG logos (no external file dependency)
+# ---------------------------------------------------------------------------
+
+LOGO_LARGE_SVG = """
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="120" height="120" rx="10" fill="#0B0F19"/>
+  <rect x="6" y="6" width="108" height="108" rx="6" fill="none"
+        stroke="#C9982A" stroke-width="1" opacity="0.55"/>
+  <text x="60" y="29" font-family="Geist, -apple-system, sans-serif" font-size="7.5"
+        font-weight="700" fill="#C9982A" text-anchor="middle" letter-spacing="3">VINTAGE</text>
+  <line x1="22" y1="40" x2="36" y2="40" stroke="#C9982A" stroke-width="0.6" opacity="0.55"/>
+  <line x1="84" y1="40" x2="98" y2="40" stroke="#C9982A" stroke-width="0.6" opacity="0.55"/>
+  <text x="60" y="82" font-family="Georgia, 'Times New Roman', serif"
+        font-size="58" font-weight="400" font-style="italic"
+        fill="#C9982A" text-anchor="middle">V</text>
+  <circle cx="60" cy="94" r="1" fill="#C9982A" opacity="0.7"/>
+  <text x="60" y="106" font-family="Geist, -apple-system, sans-serif" font-size="6.5"
+        font-weight="700" fill="#C9982A" text-anchor="middle" letter-spacing="2.5">BOUTIQUE</text>
+</svg>
+"""
+
+LOGO_SMALL_SVG = """
+<svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="40" height="40" rx="4" fill="#0B0F19"/>
+  <rect x="2" y="2" width="36" height="36" rx="2.5" fill="none"
+        stroke="#C9982A" stroke-width="0.7" opacity="0.55"/>
+  <text x="20" y="28" font-family="Georgia, 'Times New Roman', serif"
+        font-size="22" font-weight="400" font-style="italic"
+        fill="#C9982A" text-anchor="middle">V</text>
+</svg>
+"""
 
 
 # ---------------------------------------------------------------------------
 # Time helpers
 # ---------------------------------------------------------------------------
 
-def parse_time(t: str | None) -> int | None:
+def parse_time(t):
     """Parse 'HH:MM' to minutes from midnight."""
     if not t:
         return None
@@ -124,7 +69,7 @@ def parse_time(t: str | None) -> int | None:
     return int(parts[0]) * 60 + int(parts[1])
 
 
-def fmt_time_12h(minutes: int | None) -> str:
+def fmt_time_12h(minutes):
     """Format minutes-from-midnight as '10:00 AM' / '7:00 PM'."""
     if minutes is None:
         return ""
@@ -134,8 +79,8 @@ def fmt_time_12h(minutes: int | None) -> str:
     return f"{h12}:{m:02d} {suffix}"
 
 
-def fmt_duration(minutes: int) -> str:
-    """Format a duration in minutes as '8h' or '7h 30m'."""
+def fmt_duration(minutes):
+    """Format duration in minutes as '8h' or '7h 30m'."""
     if minutes <= 0:
         return "0h"
     h, m = divmod(minutes, 60)
@@ -145,20 +90,20 @@ def fmt_duration(minutes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Status definitions
+# Status metadata
 # ---------------------------------------------------------------------------
 
 STATUS_META = {
-    "working":    {"label": "Trabajando",         "key": "working"},
-    "day_off":    {"label": "Día libre",          "key": "off"},
-    "permission": {"label": "Permiso",            "key": "permission"},
-    "vacation":   {"label": "Vacaciones",         "key": "vacation"},
-    "sick":       {"label": "Incapacidad",        "key": "sick"},
+    "working":    {"label": "Trabajando",  "key": "working"},
+    "day_off":    {"label": "Día libre",   "key": "off"},
+    "permission": {"label": "Permiso",     "key": "permission"},
+    "vacation":   {"label": "Vacaciones",  "key": "vacation"},
+    "sick":       {"label": "Incapacidad", "key": "sick"},
 }
 
 
 # ---------------------------------------------------------------------------
-# CSS
+# CSS — mobile-first, with progressive breakpoints
 # ---------------------------------------------------------------------------
 
 CSS = """
@@ -198,56 +143,90 @@ CSS = """
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { font-family: var(--sans); background: var(--bg); color: var(--ink); font-size: 13px; line-height: 1.45; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 
-.vb-app { min-height: 100vh; }
+.vb-app { min-height: 100vh; width: 100%; }
 
 /* ============ TOPBAR ============ */
-.vb-topbar { background: var(--brand-black); color: #E5E7EB; padding: 14px 32px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0B0F19; }
-.vb-brand { display: flex; align-items: center; gap: 12px; }
-.vb-logo { width: 38px; height: 38px; border-radius: 4px; background-size: cover; background-position: center; border: 1px solid #1F2937; flex-shrink: 0; }
-.vb-brand-text { display: flex; flex-direction: column; line-height: 1.1; }
-.vb-brand-name { font-size: 14px; font-weight: 600; letter-spacing: -0.2px; color: #F9FAFB; }
-.vb-brand-sub { font-size: 9px; font-weight: 500; letter-spacing: 2.5px; color: var(--brand-gold-bright); text-transform: uppercase; margin-top: 2px; }
-.vb-topbar-divider { width: 1px; height: 28px; background: #1F2937; margin: 0 20px; }
-.vb-topbar-meta { font-size: 10px; text-transform: uppercase; letter-spacing: 2px; color: #6B7280; font-weight: 600; }
-.vb-topbar-right { display: flex; align-items: center; gap: 14px; }
-.vb-user { text-align: right; }
-.vb-user-role { font-size: 9px; text-transform: uppercase; letter-spacing: 2px; color: #6B7280; font-weight: 600; margin-bottom: 2px; }
-.vb-user-name { font-size: 13px; color: #F9FAFB; font-weight: 500; }
-.vb-user-avatar { width: 32px; height: 32px; border-radius: 50%; background: #1F2937; color: #E5E7EB; display: grid; place-items: center; font-weight: 600; font-size: 11px; border: 1px solid #374151; }
+.vb-topbar {
+  background: var(--brand-black); color: #E5E7EB;
+  padding: 10px 14px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid #0B0F19;
+  gap: 8px;
+}
+.vb-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vb-logo {
+  width: 34px; height: 34px; flex-shrink: 0;
+  border-radius: 4px; overflow: hidden;
+}
+.vb-logo svg { width: 100%; height: 100%; display: block; }
+.vb-brand-text { display: flex; flex-direction: column; line-height: 1.1; min-width: 0; }
+.vb-brand-name { font-size: 13px; font-weight: 600; letter-spacing: -0.2px; color: #F9FAFB;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vb-brand-sub { font-size: 8.5px; font-weight: 600; letter-spacing: 2px;
+  color: var(--brand-gold-bright); text-transform: uppercase; margin-top: 2px; }
+.vb-topbar-divider { display: none; width: 1px; height: 28px; background: #1F2937; margin: 0 14px; }
+.vb-topbar-meta { display: none; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 2px; color: #6B7280; font-weight: 600; }
+.vb-topbar-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.vb-user { display: none; text-align: right; }
+.vb-user-role { font-size: 9px; text-transform: uppercase; letter-spacing: 2px;
+  color: #6B7280; font-weight: 600; margin-bottom: 2px; }
+.vb-user-name { font-size: 12px; color: #F9FAFB; font-weight: 500;
+  white-space: nowrap; }
+.vb-user-avatar { width: 30px; height: 30px; border-radius: 50%; background: #1F2937;
+  color: #E5E7EB; display: grid; place-items: center; font-weight: 600;
+  font-size: 10px; border: 1px solid #374151; flex-shrink: 0; }
 
 /* ============ CONTAINER ============ */
-.vb-container { max-width: 1480px; margin: 0 auto; padding: 28px 32px 60px; }
+.vb-container { width: 100%; padding: 14px 12px 40px; }
 
 /* ============ PAGE HEAD ============ */
-.vb-page-head { display: flex; justify-content: space-between; align-items: flex-end; padding-bottom: 18px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
-.vb-eyebrow { font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 2.5px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
-.vb-eyebrow::before { content: ''; width: 14px; height: 1px; background: var(--brand-gold); }
-.vb-page-head h1 { font-size: 28px; font-weight: 600; letter-spacing: -0.6px; color: var(--ink); line-height: 1; margin-bottom: 8px; }
-.vb-page-date { font-size: 12px; color: var(--ink-2); font-weight: 500; font-family: var(--mono); letter-spacing: 0.2px; text-transform: uppercase; }
-.vb-page-date strong { color: var(--ink); font-weight: 600; }
-.vb-date-nav { display: flex; align-items: center; gap: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.vb-date-nav button, .vb-date-nav a { background: transparent; border: none; padding: 9px 14px; font-family: var(--sans); font-size: 11px; font-weight: 500; color: var(--ink-2); cursor: pointer; border-right: 1px solid var(--border-soft); transition: all 0.15s ease; text-decoration: none; display: inline-block; }
-.vb-date-nav button:last-child, .vb-date-nav a:last-child { border-right: none; }
-.vb-date-nav button.active, .vb-date-nav a.active { background: var(--ink); color: #FFF; }
-.vb-date-nav button:hover:not(.active), .vb-date-nav a:hover:not(.active) { background: var(--surface-3); color: var(--ink); }
+.vb-page-head { display: flex; justify-content: space-between; align-items: flex-end;
+  padding-bottom: 14px; margin-bottom: 16px; border-bottom: 1px solid var(--border);
+  flex-wrap: wrap; gap: 12px; }
+.vb-eyebrow { font-size: 9.5px; color: var(--ink-3); text-transform: uppercase;
+  letter-spacing: 2.5px; font-weight: 600; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 9px; }
+.vb-eyebrow::before { content: ''; width: 12px; height: 1px; background: var(--brand-gold); }
+.vb-page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.5px;
+  color: var(--ink); line-height: 1; margin-bottom: 6px; }
+.vb-page-date { font-size: 10.5px; color: var(--ink-2); font-weight: 500;
+  font-family: var(--mono); letter-spacing: 0.2px; text-transform: uppercase; }
 
 /* ============ STATS ============ */
-.vb-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; margin-bottom: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
-.vb-stat { padding: 18px 22px; border-right: 1px solid var(--border-soft); }
-.vb-stat:last-child { border-right: none; }
-.vb-stat-label { font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 10px; font-weight: 600; }
-.vb-stat-value { font-family: var(--mono); font-weight: 600; font-size: 32px; line-height: 1; color: var(--ink); letter-spacing: -0.8px; display: flex; align-items: baseline; gap: 6px; }
-.vb-stat-value .of { font-size: 14px; color: var(--ink-4); font-weight: 500; letter-spacing: 0; }
-.vb-stat-detail { font-size: 11px; color: var(--ink-2); margin-top: 8px; display: flex; align-items: center; gap: 7px; }
-.vb-stat-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.vb-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  margin-bottom: 14px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.vb-stat { padding: 14px 14px; border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft); }
+.vb-stat:nth-child(2n) { border-right: none; }
+.vb-stat:nth-last-child(-n+2) { border-bottom: none; }
+.vb-stat-label { font-size: 9px; color: var(--ink-3); text-transform: uppercase;
+  letter-spacing: 1.8px; margin-bottom: 8px; font-weight: 600; }
+.vb-stat-value { font-family: var(--mono); font-weight: 600; font-size: 26px;
+  line-height: 1; color: var(--ink); letter-spacing: -0.6px;
+  display: flex; align-items: baseline; gap: 5px; }
+.vb-stat-value .of { font-size: 12px; color: var(--ink-4); font-weight: 500;
+  letter-spacing: 0; }
+.vb-stat-detail { font-size: 10px; color: var(--ink-2); margin-top: 7px;
+  display: flex; align-items: center; gap: 6px; line-height: 1.3; }
+.vb-stat-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+  flex-shrink: 0; }
 
 /* ============ LEGEND ============ */
-.vb-legend { display: flex; gap: 22px; padding: 12px 22px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; margin-bottom: 24px; align-items: center; flex-wrap: wrap; }
-.vb-legend-label { font-size: 10px; text-transform: uppercase; letter-spacing: 2px; color: var(--ink-3); font-weight: 600; border-right: 1px solid var(--border-soft); padding-right: 22px; }
-.vb-legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink-2); font-weight: 500; }
-.vb-legend-swatch { width: 16px; height: 10px; border-radius: 2px; }
+.vb-legend { display: none; gap: 16px; padding: 10px 16px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; margin-bottom: 14px;
+  align-items: center; flex-wrap: wrap; }
+.vb-legend-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 2px;
+  color: var(--ink-3); font-weight: 600;
+  border-right: 1px solid var(--border-soft); padding-right: 16px; }
+.vb-legend-item { display: flex; align-items: center; gap: 7px; font-size: 10.5px;
+  color: var(--ink-2); font-weight: 500; }
+.vb-legend-swatch { width: 14px; height: 9px; border-radius: 2px; }
 .vb-legend-swatch.working { background: var(--working); }
 .vb-legend-swatch.lunch { background: var(--lunch); }
 .vb-legend-swatch.overtime { background: var(--overtime); }
@@ -257,91 +236,223 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
 .vb-legend-swatch.sick { background: var(--sick); }
 .vb-legend-swatch.late { background: var(--late); }
 
-/* ============ STORE SECTION ============ */
-.vb-store { margin-bottom: 22px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.vb-store-head { padding: 16px 22px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--surface-2); }
-.vb-store-head-left { display: flex; align-items: center; gap: 14px; }
-.vb-store-marker { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--ink-3); font-weight: 600; padding: 4px 8px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); }
-.vb-store-title { font-size: 18px; font-weight: 600; line-height: 1; color: var(--ink); letter-spacing: -0.3px; }
-.vb-store-meta { font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 1.5px; text-align: right; font-weight: 600; }
-.vb-store-meta strong { color: var(--ink); font-family: var(--mono); font-size: 14px; font-weight: 600; text-transform: none; letter-spacing: 0; display: block; margin-top: 2px; }
+/* ============ STORE ============ */
+.vb-store { margin-bottom: 16px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.vb-store-head { padding: 14px 16px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--surface-2); gap: 12px; flex-wrap: wrap; }
+.vb-store-head-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vb-store-marker { font-family: var(--mono); font-size: 9.5px;
+  text-transform: uppercase; letter-spacing: 1.3px; color: var(--ink-3);
+  font-weight: 600; padding: 3px 7px; border: 1px solid var(--border);
+  border-radius: 3px; background: var(--surface); white-space: nowrap; }
+.vb-store-title { font-size: 16px; font-weight: 600; line-height: 1;
+  color: var(--ink); letter-spacing: -0.3px; }
+.vb-store-meta { font-size: 9.5px; color: var(--ink-3); text-transform: uppercase;
+  letter-spacing: 1.3px; text-align: right; font-weight: 600; }
+.vb-store-meta strong { color: var(--ink); font-family: var(--mono); font-size: 13px;
+  font-weight: 600; text-transform: none; letter-spacing: 0; display: block; margin-top: 2px; }
 
-/* ============ TIMELINE HEADER ============ */
-.vb-timeline-head { display: grid; grid-template-columns: 240px 1fr; border-bottom: 1px solid var(--border); background: var(--surface-3); }
-.vb-timeline-head-left { border-right: 1px solid var(--border); padding: 8px 22px; font-size: 9px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 2px; display: flex; align-items: center; font-weight: 600; }
+/* ============ TIMELINE (with mobile scroll) ============ */
+.vb-store-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.vb-timeline-head { display: grid; grid-template-columns: 130px 1fr; min-width: 680px;
+  border-bottom: 1px solid var(--border); background: var(--surface-3); }
+.vb-timeline-head-left { border-right: 1px solid var(--border); padding: 8px 14px;
+  font-size: 8.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 2px;
+  display: flex; align-items: center; font-weight: 600;
+  position: sticky; left: 0; background: var(--surface-3); z-index: 2; }
 .vb-hours { display: grid; position: relative; }
-.vb-hour { padding: 8px 0 8px 7px; font-size: 10px; color: var(--ink-3); font-weight: 600; border-left: 1px solid var(--border-soft); font-family: var(--mono); letter-spacing: 0.3px; }
+.vb-hour { padding: 7px 0 7px 6px; font-size: 9.5px; color: var(--ink-3);
+  font-weight: 600; border-left: 1px solid var(--border-soft);
+  font-family: var(--mono); letter-spacing: 0.3px; }
 .vb-hour:first-child { border-left: none; }
-.vb-hour .ampm { font-size: 8px; color: var(--ink-4); margin-left: 2px; }
-.vb-now-tag { position: absolute; top: 0; transform: translateX(-50%); background: var(--ink); color: #FFF; font-size: 9px; font-weight: 600; letter-spacing: 1px; padding: 3px 7px; border-radius: 2px; z-index: 4; white-space: nowrap; font-family: var(--mono); }
+.vb-hour .ampm { font-size: 7.5px; color: var(--ink-4); margin-left: 2px; }
+.vb-now-tag { position: absolute; top: 0; transform: translateX(-50%);
+  background: var(--ink); color: #FFF; font-size: 8.5px; font-weight: 600;
+  letter-spacing: 1px; padding: 3px 6px; border-radius: 2px; z-index: 4;
+  white-space: nowrap; font-family: var(--mono); }
 
 /* ============ EMPLOYEE ROW ============ */
-.vb-emp { display: grid; grid-template-columns: 240px 1fr; border-bottom: 1px solid var(--border-soft); min-height: 72px; transition: background 0.12s ease; }
+.vb-emp { display: grid; grid-template-columns: 130px 1fr; min-width: 680px;
+  border-bottom: 1px solid var(--border-soft); min-height: 66px;
+  transition: background 0.12s ease; }
 .vb-emp:last-child { border-bottom: none; }
 .vb-emp:hover { background: var(--surface-3); }
-.vb-emp-info { padding: 14px 18px 14px 22px; border-right: 1px solid var(--border-soft); display: flex; align-items: center; gap: 12px; }
-.vb-avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--surface-3); color: var(--ink-2); display: grid; place-items: center; font-weight: 600; font-size: 12px; border: 1px solid var(--border); flex-shrink: 0; font-family: var(--mono); }
+.vb-emp-info { padding: 11px 12px; border-right: 1px solid var(--border-soft);
+  display: flex; align-items: center; gap: 9px;
+  position: sticky; left: 0; background: var(--surface); z-index: 1; }
+.vb-emp:hover .vb-emp-info { background: var(--surface-3); }
+.vb-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--surface-3);
+  color: var(--ink-2); display: grid; place-items: center; font-weight: 600;
+  font-size: 11px; border: 1px solid var(--border); flex-shrink: 0;
+  font-family: var(--mono); }
 .vb-emp-meta { flex: 1; min-width: 0; }
-.vb-emp-name { font-weight: 600; font-size: 13px; color: var(--ink); margin-bottom: 3px; letter-spacing: -0.1px; }
-.vb-emp-times { font-size: 10.5px; color: var(--ink-3); display: flex; align-items: center; gap: 5px; font-family: var(--mono); }
+.vb-emp-name { font-weight: 600; font-size: 12px; color: var(--ink); margin-bottom: 2px;
+  letter-spacing: -0.1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vb-emp-times { font-size: 9.5px; color: var(--ink-3); display: flex; align-items: center;
+  gap: 4px; font-family: var(--mono); flex-wrap: wrap; line-height: 1.3; }
 .vb-emp-times .dot { width: 2px; height: 2px; background: var(--ink-4); border-radius: 50%; }
 .vb-emp-times .pill { color: var(--ink); font-weight: 600; }
 .vb-emp-times .pill-late { color: var(--late); font-weight: 600; }
 
-/* ============ BAR TRACK ============ */
-.vb-bar-wrap { position: relative; padding: 22px 0; }
-.vb-bar-track { position: relative; height: 28px; }
-.vb-bar-grid { position: absolute; top: -10px; bottom: -10px; left: 0; right: 0; pointer-events: none; }
-.vb-bar-grid::before { content: ''; position: absolute; inset: 0; background-image: repeating-linear-gradient(to right, transparent 0, transparent calc(var(--half-step) - 1px), var(--border-soft) calc(var(--half-step) - 1px), var(--border-soft) var(--half-step)); }
-.vb-bar-grid::after { content: ''; position: absolute; inset: 0; background-image: repeating-linear-gradient(to right, transparent 0, transparent calc(var(--hour-step) - 1px), var(--border) calc(var(--hour-step) - 1px), var(--border) var(--hour-step)); }
-.vb-now-line { position: absolute; top: -10px; bottom: -10px; width: 1px; background: var(--ink); z-index: 3; pointer-events: none; }
-.vb-now-line::before { content: ''; position: absolute; top: -3px; left: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
+/* ============ BARS ============ */
+.vb-bar-wrap { position: relative; padding: 18px 0; }
+.vb-bar-track { position: relative; height: 26px; }
+.vb-bar-grid { position: absolute; top: -10px; bottom: -10px; left: 0; right: 0;
+  pointer-events: none; }
+.vb-bar-grid::before { content: ''; position: absolute; inset: 0;
+  background-image: repeating-linear-gradient(to right, transparent 0,
+    transparent calc(var(--half-step) - 1px), var(--border-soft)
+    calc(var(--half-step) - 1px), var(--border-soft) var(--half-step)); }
+.vb-bar-grid::after { content: ''; position: absolute; inset: 0;
+  background-image: repeating-linear-gradient(to right, transparent 0,
+    transparent calc(var(--hour-step) - 1px), var(--border)
+    calc(var(--hour-step) - 1px), var(--border) var(--hour-step)); }
+.vb-now-line { position: absolute; top: -10px; bottom: -10px; width: 1px;
+  background: var(--ink); z-index: 3; pointer-events: none; }
+.vb-now-line::before { content: ''; position: absolute; top: -3px; left: -3px;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
 
-.vb-bar { position: absolute; top: 0; height: 100%; border-radius: 2px; display: flex; align-items: center; padding: 0 9px; font-size: 9.5px; font-weight: 600; letter-spacing: 0.5px; color: rgba(255,255,255,0.97); overflow: hidden; white-space: nowrap; text-transform: uppercase; z-index: 2; transition: filter 0.15s ease; box-shadow: 0 1px 1px rgba(0,0,0,0.06); }
+.vb-bar { position: absolute; top: 0; height: 100%; border-radius: 2px;
+  display: flex; align-items: center; padding: 0 8px; font-size: 9px;
+  font-weight: 600; letter-spacing: 0.4px; color: rgba(255,255,255,0.97);
+  overflow: hidden; white-space: nowrap; text-transform: uppercase; z-index: 2;
+  transition: filter 0.15s ease; box-shadow: 0 1px 1px rgba(0,0,0,0.06); }
 .vb-bar:hover { filter: brightness(1.1); z-index: 5; }
 .vb-bar.working { background: linear-gradient(180deg, var(--working) 0%, var(--working-2) 100%); }
 .vb-bar.lunch { background: linear-gradient(180deg, var(--lunch) 0%, var(--lunch-2) 100%); }
-.vb-bar.overtime { background: linear-gradient(180deg, var(--overtime) 0%, var(--overtime-2) 100%); color: var(--ink); }
+.vb-bar.overtime { background: linear-gradient(180deg, var(--overtime) 0%, var(--overtime-2) 100%);
+  color: var(--ink); }
 .vb-bar.late-marker { background: var(--late); color: #FFF; }
 
-/* Absence/off row styles */
-.vb-absence { position: absolute; top: 0; left: 0; right: 0; height: 100%; border-radius: 2px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; }
-.vb-absence.off { background: repeating-linear-gradient(135deg, var(--off-bg) 0 8px, transparent 8px 16px); border: 1px dashed var(--off); color: var(--ink-2); }
-.vb-absence.permission { background: rgba(29, 78, 216, 0.08); border: 1px dashed var(--permission); color: var(--permission); }
-.vb-absence.vacation { background: rgba(8, 145, 178, 0.08); border: 1px dashed var(--vacation); color: var(--vacation); }
-.vb-absence.sick { background: rgba(124, 45, 18, 0.08); border: 1px dashed var(--sick); color: var(--sick); }
+.vb-absence { position: absolute; top: 0; left: 0; right: 0; height: 100%;
+  border-radius: 2px; display: flex; align-items: center; justify-content: center;
+  font-weight: 600; font-size: 9.5px; letter-spacing: 2px; text-transform: uppercase; }
+.vb-absence.off { background: repeating-linear-gradient(135deg, var(--off-bg) 0 8px,
+  transparent 8px 16px); border: 1px dashed var(--off); color: var(--ink-2); }
+.vb-absence.permission { background: rgba(29, 78, 216, 0.08);
+  border: 1px dashed var(--permission); color: var(--permission); }
+.vb-absence.vacation { background: rgba(8, 145, 178, 0.08);
+  border: 1px dashed var(--vacation); color: var(--vacation); }
+.vb-absence.sick { background: rgba(124, 45, 18, 0.08);
+  border: 1px dashed var(--sick); color: var(--sick); }
 
-/* Late indicator on working row */
-.vb-late-flag { position: absolute; top: -6px; right: 6px; background: var(--late); color: #FFF; font-size: 8px; font-weight: 700; letter-spacing: 1px; padding: 2px 6px; border-radius: 2px; text-transform: uppercase; z-index: 4; }
+.vb-late-flag { position: absolute; top: -5px; right: 5px; background: var(--late);
+  color: #FFF; font-size: 7.5px; font-weight: 700; letter-spacing: 1px;
+  padding: 2px 5px; border-radius: 2px; text-transform: uppercase; z-index: 4; }
 
-/* Empty state */
-.vb-empty { padding: 60px 22px; text-align: center; color: var(--ink-3); font-size: 13px; }
-.vb-empty strong { display: block; color: var(--ink); margin-bottom: 6px; font-size: 14px; }
+.vb-empty { padding: 50px 16px; text-align: center; color: var(--ink-3); font-size: 12px; }
+.vb-empty strong { display: block; color: var(--ink); margin-bottom: 5px; font-size: 13px; }
 
-/* Footer ornament */
-.vb-foot { margin-top: 32px; text-align: center; padding-top: 22px; border-top: 1px solid var(--border); }
-.vb-foot-dot { color: var(--brand-gold); letter-spacing: 4px; font-size: 11px; }
-.vb-foot-text { font-size: 10px; color: var(--ink-3); letter-spacing: 2px; text-transform: uppercase; margin-top: 6px; font-weight: 600; }
+.vb-foot { margin-top: 24px; text-align: center; padding-top: 18px;
+  border-top: 1px solid var(--border); }
+.vb-foot-dot { color: var(--brand-gold); letter-spacing: 4px; font-size: 10.5px; }
+.vb-foot-text { font-size: 9.5px; color: var(--ink-3); letter-spacing: 2px;
+  text-transform: uppercase; margin-top: 5px; font-weight: 600; }
 
-@media (max-width: 1100px) {
+/* ============================================================ */
+/* TABLET (>= 640px) */
+/* ============================================================ */
+@media (min-width: 640px) {
+  html, body { font-size: 13px; }
+  .vb-topbar { padding: 12px 22px; gap: 12px; }
+  .vb-logo { width: 38px; height: 38px; }
+  .vb-brand-name { font-size: 14px; }
+  .vb-brand-sub { font-size: 9px; letter-spacing: 2.5px; }
+  .vb-user { display: block; }
+  .vb-user-avatar { width: 32px; height: 32px; font-size: 11px; }
+  .vb-container { padding: 20px 20px 50px; }
+  .vb-page-head h1 { font-size: 24px; }
+  .vb-page-date { font-size: 11px; }
   .vb-stats { grid-template-columns: repeat(3, 1fr); }
-  .vb-stat:nth-child(3) { border-right: none; }
-  .vb-stat:nth-child(1), .vb-stat:nth-child(2), .vb-stat:nth-child(3) { border-bottom: 1px solid var(--border-soft); }
+  .vb-stat:nth-child(2n) { border-right: 1px solid var(--border-soft); }
+  .vb-stat:nth-child(3n) { border-right: none; }
+  .vb-stat:nth-last-child(-n+2) { border-bottom: 1px solid var(--border-soft); }
+  .vb-stat:nth-last-child(-n+1) { border-bottom: none; }
+  .vb-stat:nth-child(n+4) { border-bottom: none; }
+  .vb-stat { padding: 16px 18px; }
+  .vb-stat-value { font-size: 28px; }
+  .vb-legend { display: flex; }
+  .vb-store-head { padding: 15px 20px; }
+  .vb-store-title { font-size: 17px; }
+  .vb-timeline-head, .vb-emp { grid-template-columns: 180px 1fr; min-width: 700px; }
+  .vb-emp-info { padding: 13px 16px; }
+  .vb-avatar { width: 32px; height: 32px; font-size: 11px; }
+  .vb-emp-name { font-size: 12.5px; }
+  .vb-emp-times { font-size: 10px; }
+}
+
+/* ============================================================ */
+/* DESKTOP (>= 1024px) */
+/* ============================================================ */
+@media (min-width: 1024px) {
+  .vb-topbar { padding: 14px 28px; }
+  .vb-topbar-meta { display: inline-block; }
+  .vb-topbar-divider { display: block; }
+  .vb-container { padding: 24px 28px 60px; max-width: 1480px; margin: 0 auto; }
+  .vb-page-head { padding-bottom: 16px; margin-bottom: 22px; }
+  .vb-page-head h1 { font-size: 26px; }
+  .vb-stats { grid-template-columns: repeat(5, 1fr); margin-bottom: 22px; }
+  .vb-stat { padding: 17px 20px; border-right: 1px solid var(--border-soft);
+    border-bottom: none; }
+  .vb-stat:nth-child(5n) { border-right: none; }
+  .vb-stat:nth-child(3n) { border-right: 1px solid var(--border-soft); }
+  .vb-stat:last-child { border-right: none; }
+  .vb-stat-value { font-size: 30px; }
+  .vb-legend { margin-bottom: 22px; padding: 11px 20px; }
+  .vb-store { margin-bottom: 20px; }
+  .vb-store-head { padding: 16px 22px; }
+  .vb-store-title { font-size: 18px; }
+  .vb-store-meta strong { font-size: 14px; }
+  .vb-store-scroll { overflow-x: visible; }
+  .vb-timeline-head, .vb-emp { grid-template-columns: 240px 1fr; min-width: 0; }
+  .vb-timeline-head-left { padding: 8px 22px; position: static; }
+  .vb-emp-info { padding: 14px 18px 14px 22px; position: static; }
+  .vb-emp:hover .vb-emp-info { background: transparent; }
+  .vb-avatar { width: 34px; height: 34px; font-size: 12px; }
+  .vb-emp-name { font-size: 13px; }
+  .vb-emp-times { font-size: 10.5px; flex-wrap: nowrap; }
+  .vb-bar-wrap { padding: 22px 0; }
+  .vb-bar-track { height: 28px; }
+  .vb-bar { font-size: 9.5px; padding: 0 9px; }
+  .vb-foot { margin-top: 32px; padding-top: 22px; }
+}
+
+/* ============================================================ */
+/* LARGE TV (>= 1600px) */
+/* ============================================================ */
+@media (min-width: 1600px) {
+  html, body { font-size: 14px; }
+  .vb-container { max-width: 1800px; padding: 32px 40px 70px; }
+  .vb-page-head h1 { font-size: 32px; }
+  .vb-page-date { font-size: 12px; }
+  .vb-stat { padding: 20px 24px; }
+  .vb-stat-value { font-size: 34px; }
+  .vb-stat-label { font-size: 10.5px; }
+  .vb-store-title { font-size: 20px; }
+  .vb-store-meta strong { font-size: 16px; }
+  .vb-timeline-head, .vb-emp { grid-template-columns: 280px 1fr; }
+  .vb-avatar { width: 38px; height: 38px; font-size: 13px; }
+  .vb-emp-name { font-size: 14px; }
+  .vb-emp-times { font-size: 11.5px; }
+  .vb-bar { font-size: 10.5px; }
+  .vb-hour { font-size: 11px; }
 }
 </style>
 """
 
 
 # ---------------------------------------------------------------------------
-# Render: top bar
+# Render: topbar
 # ---------------------------------------------------------------------------
 
-def render_topbar(user_name: str, user_role: str) -> str:
+def render_topbar(user_name, user_role):
     initials = "".join([p[0] for p in user_name.split()[:2]]).upper() or "?"
     return f"""
 <div class="vb-topbar">
   <div class="vb-brand">
-    <div class="vb-logo" style="background-image: url('data:image/jpeg;base64,{LOGO_B64}');"></div>
+    <div class="vb-logo">{LOGO_SMALL_SVG}</div>
     <div class="vb-brand-text">
       <div class="vb-brand-name">Vintage Boutique</div>
       <div class="vb-brand-sub">Sistema de Asistencia</div>
@@ -361,10 +472,10 @@ def render_topbar(user_name: str, user_role: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Render: stats row
+# Render: stats
 # ---------------------------------------------------------------------------
 
-def render_stats(stats: dict) -> str:
+def render_stats(stats):
     total = stats.get("total", 0)
     working = stats.get("working", 0)
     lunch = stats.get("lunch", 0)
@@ -395,17 +506,13 @@ def render_stats(stats: dict) -> str:
   <div class="vb-stat">
     <div class="vb-stat-label">Otras Ausencias</div>
     <div class="vb-stat-value">{other}</div>
-    <div class="vb-stat-detail"><span class="vb-stat-dot" style="background:var(--permission)"></span>permiso · vacaciones · incapacidad</div>
+    <div class="vb-stat-detail"><span class="vb-stat-dot" style="background:var(--permission)"></span>permiso · vacaciones</div>
   </div>
 </div>
 """
 
 
-# ---------------------------------------------------------------------------
-# Render: legend
-# ---------------------------------------------------------------------------
-
-def render_legend() -> str:
+def render_legend():
     return """
 <div class="vb-legend">
   <span class="vb-legend-label">Referencia</span>
@@ -422,20 +529,10 @@ def render_legend() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Timeline rendering helpers
+# Timeline helpers
 # ---------------------------------------------------------------------------
 
-def compute_timeline_range(
-    employees_by_store: dict,
-    default_start_hour: int = 9,
-    default_end_hour: int = 19,
-    padding_hours: int = 0,
-) -> tuple[int, int]:
-    """
-    Decide the visible timeline range (in hours, 24-format).
-    Starts from earliest start time (incl. lunch and overtime) but at most default_start_hour.
-    Ends at latest end time but at least default_end_hour.
-    """
+def compute_timeline_range(employees_by_store, default_start_hour=9, default_end_hour=19):
     earliest = default_start_hour * 60
     latest = default_end_hour * 60
     for store in employees_by_store.values():
@@ -448,16 +545,14 @@ def compute_timeline_range(
                 earliest = min(earliest, ss)
             if se is not None:
                 latest = max(latest, se + (emp.get("overtime_minutes") or 0))
-    # Round to whole hours
     start_h = max(5, (earliest // 60))
     end_h = min(23, ((latest + 59) // 60))
-    # Ensure minimum width
     if end_h - start_h < 8:
         end_h = start_h + 8
     return start_h, end_h
 
 
-def render_hour_labels(start_h: int, end_h: int, now_minutes: int | None) -> str:
+def render_hour_labels(start_h, end_h, now_minutes):
     cells = []
     total_hours = end_h - start_h
     for i in range(total_hours):
@@ -475,12 +570,12 @@ def render_hour_labels(start_h: int, end_h: int, now_minutes: int | None) -> str
     grid_cols = f"repeat({total_hours}, 1fr)"
     now_tag = ""
     if now_minutes is not None and start_h * 60 <= now_minutes <= end_h * 60:
-        pct = (now_minutes - start_h * 60) / (total_hours * 60) * 100
-        now_tag = f'<div class="vb-now-tag" style="left: {pct:.2f}%;">AHORA · {fmt_time_12h(now_minutes)}</div>'
+        pct_val = (now_minutes - start_h * 60) / (total_hours * 60) * 100
+        now_tag = f'<div class="vb-now-tag" style="left: {pct_val:.2f}%;">AHORA · {fmt_time_12h(now_minutes)}</div>'
     return f'<div class="vb-hours" style="grid-template-columns: {grid_cols};">{"".join(cells)}{now_tag}</div>'
 
 
-def pct(minutes: int, start_h: int, end_h: int) -> float:
+def pct(minutes, start_h, end_h):
     total = (end_h - start_h) * 60
     return (minutes - start_h * 60) / total * 100
 
@@ -489,7 +584,7 @@ def pct(minutes: int, start_h: int, end_h: int) -> float:
 # Render: employee row
 # ---------------------------------------------------------------------------
 
-def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | None) -> str:
+def render_employee_row(emp, start_h, end_h, now_minutes):
     name = emp.get("name", "")
     initials = "".join([p[0] for p in name.split()[:2]]).upper() or "?"
     status = emp.get("status", "working")
@@ -503,7 +598,6 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
         now_pct = pct(now_minutes, start_h, end_h)
         now_line = f'<div class="vb-now-line" style="left: {now_pct:.2f}%;"></div>'
 
-    # ----- Working day -----
     if status == "working":
         ss = parse_time(emp.get("shift_start"))
         se = parse_time(emp.get("shift_end"))
@@ -513,7 +607,6 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
         is_late = emp.get("is_late", False)
         actual_start = parse_time(emp.get("actual_start"))
 
-        # Total working minutes (excluding lunch)
         total_min = 0
         if ss is not None and se is not None:
             total_min = se - ss
@@ -522,7 +615,6 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
         worked_label = fmt_duration(total_min)
         extra_label = f" + {fmt_duration(overtime_min)} extra" if overtime_min else ""
 
-        # Schedule string
         time_line_parts = [
             f"{fmt_time_12h(ss)}",
             '<span class="dot"></span>',
@@ -536,31 +628,25 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
                 f'<span class="pill-late">tarde · llegó {fmt_time_12h(actual_start)}</span>'
             )
 
-        # Bars
         bars_html = []
         if ss is not None and se is not None:
             effective_start = actual_start if (is_late and actual_start) else ss
-            # If late, render small "late" gap before bar? We'll just start the bar at the actual_start.
             if ls is not None and le is not None and ls > effective_start and le < se:
-                # Working morning
                 left = pct(effective_start, start_h, end_h)
                 width = pct(ls, start_h, end_h) - left
                 if width > 0:
                     bars_html.append(
                         f'<div class="vb-bar working" style="left: {left:.2f}%; width: {width:.2f}%;">{fmt_time_12h(effective_start)}</div>'
                     )
-                # Lunch
                 left = pct(ls, start_h, end_h)
                 width = pct(le, start_h, end_h) - left
                 bars_html.append(
                     f'<div class="vb-bar lunch" style="left: {left:.2f}%; width: {width:.2f}%;">Almuerzo</div>'
                 )
-                # Working afternoon
                 left = pct(le, start_h, end_h)
                 width = pct(se, start_h, end_h) - left
-                exit_label = f"Sale {fmt_time_12h(se)}"
                 bars_html.append(
-                    f'<div class="vb-bar working" style="left: {left:.2f}%; width: {width:.2f}%;">{exit_label}</div>'
+                    f'<div class="vb-bar working" style="left: {left:.2f}%; width: {width:.2f}%;">Sale {fmt_time_12h(se)}</div>'
                 )
             else:
                 left = pct(effective_start, start_h, end_h)
@@ -568,7 +654,6 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
                 bars_html.append(
                     f'<div class="vb-bar working" style="left: {left:.2f}%; width: {width:.2f}%;">{fmt_time_12h(effective_start)} → {fmt_time_12h(se)}</div>'
                 )
-            # Overtime
             if overtime_min:
                 left = pct(se, start_h, end_h)
                 width = pct(se + overtime_min, start_h, end_h) - left
@@ -576,7 +661,6 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
                     bars_html.append(
                         f'<div class="vb-bar overtime" style="left: {left:.2f}%; width: {width:.2f}%;">+ Extra</div>'
                     )
-            # Late flag
             if is_late:
                 bars_html.append('<div class="vb-late-flag">Tarde</div>')
 
@@ -599,7 +683,6 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
 </div>
 """
 
-    # ----- Absence states -----
     absence_classes = {
         "day_off": ("off", "Día libre"),
         "permission": ("permission", "Permiso"),
@@ -630,19 +713,7 @@ def render_employee_row(emp: dict, start_h: int, end_h: int, now_minutes: int | 
 """
 
 
-# ---------------------------------------------------------------------------
-# Render: store section
-# ---------------------------------------------------------------------------
-
-def render_store(
-    title: str,
-    marker: str,
-    employees: list[dict],
-    start_h: int,
-    end_h: int,
-    now_minutes: int | None,
-) -> str:
-    # Total scheduled hours
+def render_store(title, marker, employees, start_h, end_h, now_minutes):
     total_min = 0
     for emp in employees:
         if emp.get("status") != "working":
@@ -672,11 +743,13 @@ def render_store(
     </div>
     <div class="vb-store-meta">Horas programadas<strong>{fmt_duration(total_min)}</strong></div>
   </div>
-  <div class="vb-timeline-head">
-    <div class="vb-timeline-head-left">Personal</div>
-    {render_hour_labels(start_h, end_h, now_minutes)}
+  <div class="vb-store-scroll">
+    <div class="vb-timeline-head">
+      <div class="vb-timeline-head-left">Personal</div>
+      {render_hour_labels(start_h, end_h, now_minutes)}
+    </div>
+    {rows_html}
   </div>
-  {rows_html}
 </div>
 """
 
@@ -685,10 +758,9 @@ def render_store(
 # Render: full dashboard
 # ---------------------------------------------------------------------------
 
-def render_dashboard(data: dict, user_name: str = "Lic. Juan Orozco", user_role: str = "Gerencia") -> str:
-    """Render the complete dashboard view as HTML."""
+def render_dashboard(data, user_name="Lic. Juan Orozco", user_role="Gerencia"):
     date_display = data.get("date_display", "")
-    now_minutes = data.get("now_minutes")  # None for past/future dates
+    now_minutes = data.get("now_minutes")
     stats = data.get("stats", {})
     stores = data.get("stores", [])
 
