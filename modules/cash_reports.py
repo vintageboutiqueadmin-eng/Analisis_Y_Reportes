@@ -459,56 +459,70 @@ def _render_section_photos(bucket_key: str, section_number: int,
 # Analysis with Claude
 # ---------------------------------------------------------------------------
 
-ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minoristas. Te entregaré tres tipos de documentos del cierre de caja diario de Vintage Boutique (Antigua Guatemala):
+ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minoristas. Te entregaré tres tipos de documentos del cierre de caja de Vintage Boutique (Antigua Guatemala), además de:
+- Un **catálogo de documentos ya procesados** en cierres anteriores (para detectar duplicados)
+- Una **bandeja de pendientes** (boletas / depósitos sin pareja de cierres anteriores que podrían cuadrar con los archivos de hoy)
+
+## Tipos de documentos que recibes
 
 1. **PDFs de cierre de caja del POS** — uno por cada cajero. Cada uno contiene:
-   - Número de referencia POS/AAAA/MM/DD/NNNN
+   - Número de referencia POS/AAAA/MM/DD/NNNN (identificador único del PDF)
    - Tienda (6ta Avenida o 7ma Avenida)
    - Cajero (nombre)
+   - Fecha del cierre (la fecha embebida en el número POS)
    - Totales por forma de pago: Tarjeta CREDOMATIC, Tarjeta VISANET, Efectivo
    - Total de depósito bancario realizado
-   - Detalle de transacciones individuales con tarjeta (incluyendo nombre del cliente y monto)
+   - Detalle de transacciones individuales con tarjeta (con nombre del cliente y monto)
 
-2. **Fotos de tickets NEONET y/o Credomatic** — son los resúmenes físicos de las transacciones de tarjeta que imprime el POS.
-   - NEONET maneja típicamente VISA / MASTERCARD / etc.
+2. **Fotos de tickets NEONET y/o Credomatic** — resúmenes físicos de las transacciones de tarjeta del POS.
+   - NEONET maneja VISA / MASTERCARD / etc.
    - Credomatic es procesador separado.
-   - Cada ticket tiene fecha, terminal, lote, lista de transacciones y total
+   - Cada ticket tiene: fecha, hora, lote (ej. "Lote 000969"), terminal, lista de transacciones y total.
+   - **Identificador único del ticket**: combinación `procesador + lote` (ej. "NEONET-000969" o "CREDOMATIC-000865").
 
-3. **Fotos de boletas de depósito bancario** — comprobantes del Banco G&T Continental u otro banco donde se depositó el efectivo del día.
-   - **MUY IMPORTANTE**: Las boletas de banco frecuentemente tienen fecha del **día siguiente** al de los cierres del POS. Esto es normal y esperado: los cajeros cierran al final del día y depositan a la mañana siguiente. NO descartes una boleta solo porque tiene fecha de "día siguiente" o "lunes" después de cierres del viernes.
-   - El criterio para hacer match es **monto exacto** (con tolerancia de Q 1.00), no la fecha.
+3. **Fotos de boletas de depósito bancario** — comprobantes del banco donde se depositó el efectivo.
+   - **Identificador único de la boleta**: el campo `J No. XXXXXXXX` (número grande en rojo arriba) o `No. Comprobante: XXXXXXXX`. SON EL MISMO NÚMERO.
+   - Si la boleta dice "REIMPRESION" arriba, igual usas el número J/Comprobante que muestra.
 
-**Tu tarea:** Cruzar los datos y producir un reporte de conciliación. Específicamente:
+## Reglas críticas de la conciliación
 
-A) **Suma total por forma de pago según los PDFs:**
-   - CREDOMATIC total (suma de los PDFs)
-   - VISANET / NEONET total (suma de los PDFs)
-   - Efectivo total (suma de los PDFs)
-   - Depósitos bancarios total (suma de los PDFs)
+**REGLA #1 — Ignora completamente las fechas para hacer matching.** El depósito de un cierre puede hacerse al día siguiente, dos días después, o el lunes para cierres del fin de semana. Lo que importa es que los montos cuadren. Tolerancia de Q 1.00.
 
-B) **Verifica que los totales de tarjeta cuadran con los tickets físicos:**
-   - ¿La suma de CREDOMATIC del POS = total del ticket Credomatic? (tolerancia Q 0.50)
-   - ¿La suma de VISANET del POS = total del ticket NEONET? (tolerancia Q 0.50)
+**REGLA #2 — Detección de duplicados contra historial.** Te paso un catálogo con los IDs de documentos ya procesados (pos_refs, bank_slip_numbers, neonet_lotes). Si en los archivos de HOY encuentras:
+   - Un PDF cuyo POS ref ya está en el catálogo → es duplicado del cierre anterior. **EXCLÚYELO totalmente del cálculo de totales** (no sumes sus montos) y repórtalo como finding rojo indicando en cuál cierre histórico está.
+   - Una boleta cuyo J No. ya está en el catálogo → mismo trato: excluir del cálculo, reportar.
+   - Un ticket NEONET/Credomatic cuyo lote ya está en el catálogo → mismo trato.
 
-C) **Verifica que los depósitos bancarios cuadran con las boletas de banco:**
-   - Por cada PDF que declara un depósito, busca una boleta de banco con **monto coincidente** (tolerancia Q 1.00).
-   - **No descartes boletas por diferencia de fecha** — los depósitos casi siempre se hacen al día siguiente.
-   - Lista los depósitos sin boleta correspondiente (missing_slips).
-   - Lista boletas sin depósito correspondiente (orphan_slips).
+**REGLA #3 — Matching con la bandeja de pendientes.** Te paso una lista de pendientes acumulados de análisis anteriores. Cada pendiente tiene: tipo (boleta_huerfana o deposito_sin_boleta), monto, ID del cierre histórico de origen, y datos adicionales.
+   - Para cada **boleta huérfana** en pendientes: trata de hacer match con depósitos sin boleta de los PDFs de HOY. Si cuadran por monto (±Q 1.00), se resuelve.
+   - Para cada **depósito sin boleta** en pendientes: trata de hacer match con boletas que recibes HOY. Si cuadran, se resuelve.
+   - Reporta cada match resuelto en el campo `resolved_pending` del JSON.
 
-D) **Detecta cualquier inconsistencia interna del PDF:**
-   - Si un PDF muestra "Diferencia: Q X.XX" donde X > 0, repórtalo como alerta crítica.
-   - Si hay múltiples montos contradictorios en un PDF (ej. dos líneas de "Total cobrado en Efectivo" con valores distintos), repórtalo.
+**REGLA #4 — Detección de duplicados internos.** Si dos PDFs del MISMO upload tienen el mismo POS ref, o dos boletas tienen el mismo J No., trátalo igual: solo cuenta una vez, reporta el duplicado.
 
-E) **Detecta duplicados:**
-   - Si dos PDFs comparten el mismo número POS/AAAA/MM/DD/NNNN, repórtalo y cuenta los montos UNA SOLA VEZ.
+## Tu análisis debe producir
 
-F) **Extrae clientes VIP:**
-   - Recorre las transacciones de TODOS los PDFs y lista los **clientes con montos individuales >= Q 200** (transacciones únicas grandes). No incluyas "CONSUMIDOR FINAL".
-   - Para cada uno: nombre del cliente, monto, cajero que lo atendió, tienda, método de pago.
-   - Ordena de mayor a menor monto.
+A) **Totales** (excluyendo duplicados, contando una sola vez):
+   - CREDOMATIC, VISANET/NEONET, Efectivo, Depósitos bancarios, Total ventas
 
-**Devuelve tu respuesta en JSON estructurado** con esta forma exacta (no agregues texto fuera del JSON):
+B) **Conciliación de tarjetas**: suma del PDF vs total del ticket físico (CREDOMATIC contra ticket Credomatic, VISANET contra ticket NEONET).
+
+C) **Conciliación bancaria**: cada depósito del PDF contra cada boleta de banco recibida (por monto). Tres listas:
+   - `matched`: depósitos del PDF que cuadran con boletas
+   - `missing_slips`: depósitos del PDF sin boleta correspondiente (van a la bandeja de pendientes)
+   - `orphan_slips`: boletas de banco sin depósito correspondiente en los PDFs de hoy (van a la bandeja)
+
+D) **Detección de inconsistencias internas en PDFs**: diferencias internas, líneas contradictorias.
+
+E) **Detección de duplicados** (cross-historical + interno).
+
+F) **Resolución de pendientes**: qué pendientes anteriores se cuadraron con los archivos de hoy.
+
+G) **Clientes VIP**: transacciones con clientes nombrados (no "CONSUMIDOR FINAL") por Q 200 o más.
+
+H) **Fecha del cierre**: extrae la fecha de los PDFs del POS (todos deberían ser de la misma fecha o muy cercanos). Si los PDFs tienen fechas distintas, usa la más frecuente y repórtalo como warning.
+
+## Devuelve JSON estructurado (sin texto fuera):
 
 ```json
 {
@@ -539,6 +553,7 @@ F) **Extrae clientes VIP:**
     "credomatic": {
       "pos_total": 0.00,
       "ticket_total": 0.00,
+      "ticket_lote": "000865",
       "difference": 0.00,
       "status": "ok" | "warning" | "error",
       "note": ""
@@ -546,6 +561,7 @@ F) **Extrae clientes VIP:**
     "visanet_neonet": {
       "pos_total": 0.00,
       "ticket_total": 0.00,
+      "ticket_lote": "000969",
       "difference": 0.00,
       "status": "ok" | "warning" | "error",
       "note": ""
@@ -575,6 +591,30 @@ F) **Extrae clientes VIP:**
       "pos_ref": "POS/2026/05/12/7488"
     }
   ],
+  "duplicates_detected": {
+    "pdfs": [
+      {"pos_ref": "...", "filename": "...", "previously_in_report_id": "..." or null,
+       "reason": "ya existe en historial" | "duplicado interno del upload actual"}
+    ],
+    "bank_slips": [
+      {"slip_number": "...", "filename": "...", "previously_in_report_id": "..." or null,
+       "reason": "..."}
+    ],
+    "neonet_tickets": [
+      {"procesador": "NEONET" | "CREDOMATIC", "lote": "...", "filename": "...",
+       "previously_in_report_id": "..." or null, "reason": "..."}
+    ]
+  },
+  "resolved_pending": [
+    {
+      "pending_type": "boleta_huerfana" | "deposito_sin_boleta",
+      "pending_id": "ID del pendiente original",
+      "original_report_id": "...",
+      "amount": 0.00,
+      "matched_with": "POS/2026/05/12/7488" | "slip_number XXX",
+      "note": "Boleta huérfana del 10/05 cuadró con depósito sin boleta del cierre actual"
+    }
+  ],
   "findings": [
     {
       "severity": "ok" | "warn" | "alert",
@@ -585,7 +625,7 @@ F) **Extrae clientes VIP:**
 }
 ```
 
-**Sé extremadamente cuidadoso con los montos.** Estos son datos contables reales — un error tuyo puede causar problemas financieros. Si tienes la menor duda sobre algún número, refleja la duda en el campo `note` o como una alerta en `findings`. Mejor ser conservador y reportar dudas que asumir.
+**Sé extremadamente cuidadoso con los montos.** Estos son datos contables reales. Si tienes la menor duda sobre algún número, refleja la duda en el campo `note` o como una alerta en `findings`. Mejor ser conservador y reportar dudas que asumir.
 
 Trabaja en GTQ (Quetzales guatemaltecos). Usa punto decimal."""
 
@@ -594,15 +634,76 @@ def _to_base64(data: bytes) -> str:
     return base64.standard_b64encode(data).decode("utf-8")
 
 
-def _build_anthropic_content(pdfs: list, neonet: list, boletas: list) -> list:
+def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
+                              catalog: dict, pending: list) -> list:
     """Build the content blocks for the Anthropic API call."""
     blocks = []
+
+    # Catalog of already-processed IDs (for duplicate detection)
+    catalog_text = (
+        "=== CATÁLOGO DE DOCUMENTOS YA PROCESADOS EN CIERRES ANTERIORES ===\n"
+        "Si encuentras alguno de estos IDs en los archivos de HOY, márcalo como duplicado "
+        "histórico, EXCLÚYELO del cálculo de totales, y reporta el report_id donde ya existía.\n\n"
+        f"PDFs ya procesados (pos_ref → report_id):\n"
+    )
+    if catalog.get("pos_refs"):
+        for ref, rid in catalog["pos_refs"].items():
+            catalog_text += f"  - {ref} → {rid}\n"
+    else:
+        catalog_text += "  (ninguno todavía)\n"
+
+    catalog_text += "\nBoletas de banco ya procesadas (J No. → report_id):\n"
+    if catalog.get("bank_slips"):
+        for sn, rid in catalog["bank_slips"].items():
+            catalog_text += f"  - {sn} → {rid}\n"
+    else:
+        catalog_text += "  (ninguna todavía)\n"
+
+    catalog_text += "\nTickets NEONET/Credomatic ya procesados (procesador-lote → report_id):\n"
+    if catalog.get("tickets"):
+        for key, rid in catalog["tickets"].items():
+            catalog_text += f"  - {key} → {rid}\n"
+    else:
+        catalog_text += "  (ninguno todavía)\n"
+
+    blocks.append({"type": "text", "text": catalog_text})
+
+    # Pending tray
+    pending_text = (
+        "\n=== BANDEJA DE PENDIENTES (de cierres anteriores) ===\n"
+        "Estos son depósitos sin boleta y boletas huérfanas de cierres anteriores. "
+        "Intenta hacer match con los archivos de HOY (por monto, tolerancia Q 1.00). "
+        "Cada match resuelto va en el campo `resolved_pending` del JSON.\n\n"
+    )
+    if pending:
+        for p in pending:
+            details = p.get("details", {})
+            if p["type"] == "deposito_sin_boleta":
+                pending_text += (
+                    f"  - PENDIENTE id={p['id']} type=deposito_sin_boleta "
+                    f"amount=Q{p['amount']:.2f} "
+                    f"origin_report_id={p['origin_report_id']} "
+                    f"pos_ref={details.get('pos_ref', '?')} "
+                    f"cashier={details.get('cashier', '?')}\n"
+                )
+            elif p["type"] == "boleta_huerfana":
+                pending_text += (
+                    f"  - PENDIENTE id={p['id']} type=boleta_huerfana "
+                    f"amount=Q{p['amount']:.2f} "
+                    f"origin_report_id={p['origin_report_id']} "
+                    f"slip_number={details.get('slip_number', '?')} "
+                    f"slip_date={details.get('date', '?')}\n"
+                )
+    else:
+        pending_text += "  (sin pendientes)\n"
+
+    blocks.append({"type": "text", "text": pending_text})
 
     # Section 1: PDFs
     if pdfs:
         blocks.append({
             "type": "text",
-            "text": f"=== SECCIÓN 1: PDFs DE CIERRE DE CAJA ({len(pdfs)} archivos) ==="
+            "text": f"\n=== SECCIÓN 1: PDFs DE CIERRE DE CAJA ({len(pdfs)} archivos) ==="
         })
         for f in pdfs:
             blocks.append({
@@ -664,21 +765,21 @@ def _build_anthropic_content(pdfs: list, neonet: list, boletas: list) -> list:
 
     blocks.append({
         "type": "text",
-        "text": "\n\nPor favor, analiza todos los documentos anteriores y devuelve "
-                "el JSON estructurado de conciliación tal como se especificó. "
-                "Solo el JSON, sin texto adicional, sin markdown."
+        "text": "\n\nAnaliza todos los documentos anteriores siguiendo las reglas críticas y "
+                "devuelve SOLO el JSON estructurado (sin texto adicional, sin markdown)."
     })
     return blocks
 
 
-def _call_claude(pdfs: list, neonet: list, boletas: list) -> dict:
-    """Call Claude Opus 4.7 with all uploaded files. Returns parsed JSON."""
+def _call_claude(pdfs: list, neonet: list, boletas: list,
+                 catalog: dict, pending: list) -> dict:
+    """Call Claude Opus 4.7 with all uploaded files + historical context."""
     import anthropic
 
     api_key = st.secrets["anthropic"]["api_key"]
     client = anthropic.Anthropic(api_key=api_key)
 
-    content = _build_anthropic_content(pdfs, neonet, boletas)
+    content = _build_anthropic_content(pdfs, neonet, boletas, catalog, pending)
 
     response = client.messages.create(
         model="claude-opus-4-7",
@@ -687,16 +788,13 @@ def _call_claude(pdfs: list, neonet: list, boletas: list) -> dict:
         messages=[{"role": "user", "content": content}],
     )
 
-    # Extract the text response
     text = ""
     for block in response.content:
         if block.type == "text":
             text += block.text
 
-    # Try to extract JSON if wrapped in markdown
     text = text.strip()
     if text.startswith("```"):
-        # strip ```json ... ```
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
 
@@ -954,6 +1052,82 @@ def _render_report(report: dict):
             unsafe_allow_html=True,
         )
 
+    # Duplicados detectados
+    dups = report.get("duplicates_detected", {}) or {}
+    has_dups = any([
+        dups.get("pdfs"), dups.get("bank_slips"), dups.get("neonet_tickets")
+    ])
+    if has_dups:
+        st.markdown('<div class="cc-section-label">🚫 Duplicados detectados '
+                    '<span style="color:#6C7280;font-weight:500;">'
+                    '(excluidos automáticamente del cálculo)</span></div>',
+                    unsafe_allow_html=True)
+        for pdf in (dups.get("pdfs") or []):
+            prev = pdf.get("previously_in_report_id") or "—"
+            st.markdown(
+                f'<div class="cc-finding alert">'
+                f'<div class="cc-finding-title">'
+                f'📄 PDF duplicado: {pdf.get("pos_ref", "?")}'
+                f'</div>'
+                f'<div class="cc-finding-body">'
+                f'Archivo: <code>{pdf.get("filename", "")}</code> · '
+                f'{pdf.get("reason", "")} · '
+                f'En reporte: <code>{prev}</code>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+        for slip in (dups.get("bank_slips") or []):
+            prev = slip.get("previously_in_report_id") or "—"
+            st.markdown(
+                f'<div class="cc-finding alert">'
+                f'<div class="cc-finding-title">'
+                f'🧾 Boleta duplicada: J No. {slip.get("slip_number", "?")}'
+                f'</div>'
+                f'<div class="cc-finding-body">'
+                f'Archivo: <code>{slip.get("filename", "")}</code> · '
+                f'{slip.get("reason", "")} · '
+                f'En reporte: <code>{prev}</code>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+        for tk in (dups.get("neonet_tickets") or []):
+            prev = tk.get("previously_in_report_id") or "—"
+            st.markdown(
+                f'<div class="cc-finding alert">'
+                f'<div class="cc-finding-title">'
+                f'💳 Ticket duplicado: {tk.get("procesador","?")} - Lote {tk.get("lote","?")}'
+                f'</div>'
+                f'<div class="cc-finding-body">'
+                f'Archivo: <code>{tk.get("filename", "")}</code> · '
+                f'{tk.get("reason", "")} · '
+                f'En reporte: <code>{prev}</code>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    # Pendientes resueltos
+    resolved = report.get("resolved_pending") or []
+    if resolved:
+        st.markdown('<div class="cc-section-label">✅ Pendientes resueltos en este análisis</div>',
+                    unsafe_allow_html=True)
+        for r in resolved:
+            ptype_label = {
+                "boleta_huerfana": "Boleta huérfana",
+                "deposito_sin_boleta": "Depósito sin boleta",
+            }.get(r.get("pending_type", ""), "Pendiente")
+            st.markdown(
+                f'<div class="cc-finding ok">'
+                f'<div class="cc-finding-title">'
+                f'{ptype_label} — {_fmt_q(r.get("amount", 0))}'
+                f'</div>'
+                f'<div class="cc-finding-body">'
+                f'{r.get("note", "")} · '
+                f'Cuadró con: <code>{r.get("matched_with", "")}</code> · '
+                f'Cierre origen: <code>{r.get("original_report_id", "")}</code>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+
     # General findings
     findings = report.get("findings", [])
     if findings:
@@ -1190,6 +1364,60 @@ def _build_report_pdf(report: dict, user_name: str) -> bytes:
         ]))
         story.append(t)
 
+    # Duplicados detectados
+    dups = report.get("duplicates_detected", {}) or {}
+    has_dups = any([
+        dups.get("pdfs"), dups.get("bank_slips"), dups.get("neonet_tickets")
+    ])
+    if has_dups:
+        story.append(Paragraph("Duplicados detectados (excluidos del cálculo)", h2_style))
+        for pdf in (dups.get("pdfs") or []):
+            prev = pdf.get("previously_in_report_id") or "—"
+            story.append(Paragraph(
+                f"<font color='#B91C1C'><b>📄 PDF duplicado:</b> {pdf.get('pos_ref','?')}</font><br/>"
+                f"<font size='8' color='#6C7280'>Archivo: {pdf.get('filename','')} · "
+                f"{pdf.get('reason','')} · En reporte: {prev}</font>",
+                body_style,
+            ))
+            story.append(Spacer(1, 4))
+        for slip in (dups.get("bank_slips") or []):
+            prev = slip.get("previously_in_report_id") or "—"
+            story.append(Paragraph(
+                f"<font color='#B91C1C'><b>🧾 Boleta duplicada:</b> J No. {slip.get('slip_number','?')}</font><br/>"
+                f"<font size='8' color='#6C7280'>Archivo: {slip.get('filename','')} · "
+                f"{slip.get('reason','')} · En reporte: {prev}</font>",
+                body_style,
+            ))
+            story.append(Spacer(1, 4))
+        for tk in (dups.get("neonet_tickets") or []):
+            prev = tk.get("previously_in_report_id") or "—"
+            story.append(Paragraph(
+                f"<font color='#B91C1C'><b>💳 Ticket duplicado:</b> "
+                f"{tk.get('procesador','?')} Lote {tk.get('lote','?')}</font><br/>"
+                f"<font size='8' color='#6C7280'>Archivo: {tk.get('filename','')} · "
+                f"{tk.get('reason','')} · En reporte: {prev}</font>",
+                body_style,
+            ))
+            story.append(Spacer(1, 4))
+
+    # Pendientes resueltos
+    resolved = report.get("resolved_pending") or []
+    if resolved:
+        story.append(Paragraph("Pendientes resueltos en este análisis", h2_style))
+        for r in resolved:
+            ptype_label = {
+                "boleta_huerfana": "Boleta huérfana",
+                "deposito_sin_boleta": "Depósito sin boleta",
+            }.get(r.get("pending_type", ""), "Pendiente")
+            story.append(Paragraph(
+                f"<font color='#15803D'><b>✓ {ptype_label}:</b> {_fmt_q(r.get('amount', 0))}</font><br/>"
+                f"<font size='8' color='#6C7280'>{r.get('note','')} · "
+                f"Cuadró con: {r.get('matched_with','')} · "
+                f"Origen: {r.get('original_report_id','')}</font>",
+                body_style,
+            ))
+            story.append(Spacer(1, 4))
+
     # Findings
     findings = report.get("findings", [])
     if findings:
@@ -1245,28 +1473,38 @@ def render(current_user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # Date picker + clear-all button
-    col1, col2, col3 = st.columns([2, 2, 1])
+    # Top bar: file count + clear-all button (no date picker — Claude extracts date)
+    col1, col2 = st.columns([3, 1])
     with col1:
-        report_date = st.date_input(
-            "📅 Fecha del cierre que estás conciliando",
-            value=st.session_state.get("cc_report_date", _today_gt()),
-            format="DD/MM/YYYY",
+        n_total = (len(_bucket("cc_pdfs")) + len(_bucket("cc_neonet"))
+                   + len(_bucket("cc_boletas")))
+        # Check pending tray
+        try:
+            pending_count = len(cash_history.list_pending(only_open=True))
+        except Exception:
+            pending_count = 0
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:18px;height:38px;'>"
+            f"<span style='font-size:12px;color:#3D4554;'>"
+            f"📂 Archivos cargados: <strong>{n_total}</strong></span>"
+            f"<span style='font-size:12px;color:#3D4554;'>"
+            f"⏳ Pendientes en bandeja: <strong>{pending_count}</strong></span>"
+            f"<span style='font-size:11px;color:#6C7280;font-style:italic;'>"
+            f"La fecha del cierre se detecta automáticamente de los PDFs.</span>"
+            f"</div>",
+            unsafe_allow_html=True,
         )
-        st.session_state.cc_report_date = report_date
 
     with col2:
-        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-        n_total = len(_bucket("cc_pdfs")) + len(_bucket("cc_neonet")) + len(_bucket("cc_boletas"))
-        st.caption(f"📂 Archivos cargados: **{n_total}**")
-
-    with col3:
-        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
         if st.button("🗑 Limpiar todo", use_container_width=True):
             _clear_bucket("cc_pdfs")
             _clear_bucket("cc_neonet")
             _clear_bucket("cc_boletas")
             st.session_state.pop("cc_last_report", None)
+            st.session_state.pop("cc_last_report_id", None)
+            # Also clear upload fingerprints so user can re-upload same files
+            for k in ("cc_pdfs_fp", "cc_neonet_fp", "cc_boletas_fp"):
+                st.session_state.pop(k, None)
             st.rerun()
 
     st.markdown("---")
@@ -1304,14 +1542,14 @@ def render(current_user: dict) -> None:
             "más completa será la conciliación."
         )
     else:
-        # CTA
         st.markdown(
             f'<div class="cc-analyze-cta">'
             f'<h3>Listo para analizar y conciliar</h3>'
             f'<p>Tenemos <span class="cta-gold">{len(pdfs)} PDF(s)</span> · '
             f'<span class="cta-gold">{len(neonet)} foto(s) NEONET</span> · '
             f'<span class="cta-gold">{len(boletas)} boleta(s)</span>. '
-            f'La IA cruzará los datos y te dirá si todo cuadra.</p>'
+            f'La IA cruzará los datos contra el historial y la bandeja de pendientes, '
+            f'detectará duplicados y matcheará por monto sin importar la fecha.</p>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -1325,43 +1563,83 @@ def render(current_user: dict) -> None:
             )
 
         if analyze:
-            # Check API key configured
             try:
                 _ = st.secrets["anthropic"]["api_key"]
             except Exception:
                 st.error(
-                    "⚠ Falta configurar la API key de Anthropic en los secrets de Streamlit. "
+                    "⚠ Falta configurar la API key de Anthropic en los secrets. "
                     "Agrega:\n```toml\n[anthropic]\napi_key = \"sk-ant-...\"\n```"
                 )
                 return
 
             with st.spinner(
-                "🔬 Claude está leyendo todos los documentos y haciendo la conciliación... "
-                "Esto puede tardar 30–60 segundos."
+                "🔬 Claude está leyendo todos los documentos, comparando contra el "
+                "historial y revisando la bandeja de pendientes... Esto puede tardar "
+                "30–90 segundos."
             ):
                 try:
-                    report = _call_claude(pdfs, neonet, boletas)
+                    # Build catalog of already-processed IDs
+                    catalog = cash_history.build_processed_catalog()
+                    # Get open pending items
+                    pending = cash_history.list_pending(only_open=True)
+                    # Call Claude with full context
+                    report = _call_claude(pdfs, neonet, boletas, catalog, pending)
                     st.session_state.cc_last_report = report
-                    # Save to history (Google Sheets)
-                    try:
-                        rid = cash_history.save_report(
-                            report,
-                            user_email=current_user["email"],
-                            n_pdfs=len(pdfs),
-                            n_neonet=len(neonet),
-                            n_boletas=len(boletas),
-                        )
-                        st.session_state.cc_last_report_id = rid
-                        st.success(f"✓ Análisis completo · Guardado en historial (ID: {rid})")
-                    except Exception as hist_err:
-                        st.success("✓ Análisis completo")
-                        st.warning(
-                            f"El análisis se generó, pero no se pudo guardar en "
-                            f"el historial. Detalle: `{hist_err}`"
-                        )
                 except Exception as e:
                     st.error(f"Error durante el análisis: `{e}`")
                     return
+
+                # Save the report
+                try:
+                    rid = cash_history.save_report(
+                        report,
+                        user_email=current_user["email"],
+                        n_pdfs=len(pdfs),
+                        n_neonet=len(neonet),
+                        n_boletas=len(boletas),
+                    )
+                    st.session_state.cc_last_report_id = rid
+                except Exception as e:
+                    st.warning(f"Análisis OK, pero no se guardó en historial: `{e}`")
+                    rid = None
+
+                # Process resolved pendings: mark them and update origin reports
+                resolved = report.get("resolved_pending") or []
+                resolved_count = 0
+                origin_updates = 0
+                if resolved and rid:
+                    try:
+                        for r in resolved:
+                            pid = r.get("pending_id", "")
+                            if pid and cash_history.mark_pending_resolved(pid, rid):
+                                resolved_count += 1
+                        origin_updates = cash_history.apply_resolutions_to_origin_reports(resolved)
+                    except Exception as e:
+                        st.warning(f"No se pudieron procesar las resoluciones: `{e}`")
+
+                # Add new pendings from this report's missing/orphans
+                new_pending_added = 0
+                if rid:
+                    try:
+                        info = cash_history.add_pending_from_report(report, rid)
+                        new_pending_added = info["added"]
+                    except Exception as e:
+                        st.warning(f"No se pudieron registrar nuevos pendientes: `{e}`")
+
+                # Final success message
+                msg = "✓ Análisis completo"
+                bits = []
+                if rid:
+                    bits.append(f"guardado en historial (ID: {rid})")
+                if resolved_count:
+                    bits.append(f"{resolved_count} pendiente(s) resuelto(s)")
+                if origin_updates:
+                    bits.append(f"{origin_updates} cierre(s) antiguo(s) actualizado(s)")
+                if new_pending_added:
+                    bits.append(f"{new_pending_added} nuevo(s) pendiente(s) en bandeja")
+                if bits:
+                    msg += " · " + " · ".join(bits)
+                st.success(msg)
 
     # Show last report if it exists
     if st.session_state.get("cc_last_report"):
