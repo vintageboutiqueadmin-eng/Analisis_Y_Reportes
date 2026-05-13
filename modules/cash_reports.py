@@ -20,6 +20,8 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from . import cash_history
+
 
 GT_TZ = ZoneInfo("America/Guatemala")
 
@@ -372,22 +374,15 @@ def _render_section_pdfs():
         label_visibility="collapsed",
     )
 
+    # Auto-add files when uploaded (no separate button needed)
     if uploaded:
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("➕ Agregar", use_container_width=True,
-                         type="primary", key="add_pdfs_btn"):
-                n = _add_files("cc_pdfs", uploaded)
-                if n:
-                    st.success(f"✓ {n} PDF(s) agregado(s)")
-                else:
-                    st.info("Todos los archivos ya estaban cargados.")
-                st.rerun()
-        with col1:
-            st.caption(
-                f"**{len(uploaded)}** archivo(s) listos. "
-                "Cada PDF se identifica por su número de cierre (POS/AAAA/MM/DD/NNNN)."
-            )
+        # Use a fingerprint based on names + sizes to detect new uploads
+        fingerprint = tuple(sorted((u.name, u.size) for u in uploaded))
+        last_fp = st.session_state.get("cc_pdfs_fp")
+        if fingerprint != last_fp:
+            _add_files("cc_pdfs", uploaded)
+            st.session_state["cc_pdfs_fp"] = fingerprint
+            st.rerun()
 
     # Show duplicates warning
     dups = _detect_pdf_duplicates("cc_pdfs")
@@ -441,19 +436,15 @@ def _render_section_photos(bucket_key: str, section_number: int,
         label_visibility="collapsed",
     )
 
+    # Auto-add on upload
     if uploaded:
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("➕ Agregar", use_container_width=True,
-                         type="primary", key=f"add_{bucket_key}_btn"):
-                n = _add_files(bucket_key, uploaded, rename_prefix=rename_prefix)
-                if n:
-                    st.success(f"✓ {n} foto(s) agregada(s)")
-                else:
-                    st.info("Esas fotos ya estaban cargadas.")
-                st.rerun()
-        with col1:
-            st.caption(f"**{len(uploaded)}** archivo(s) listos para agregar.")
+        fp_key = f"{bucket_key}_fp"
+        fingerprint = tuple(sorted((u.name, u.size) for u in uploaded))
+        last_fp = st.session_state.get(fp_key)
+        if fingerprint != last_fp:
+            _add_files(bucket_key, uploaded, rename_prefix=rename_prefix)
+            st.session_state[fp_key] = fingerprint
+            st.rerun()
 
     st.markdown(
         '<div style="margin-top:14px;font-size:11px;letter-spacing:2px;'
@@ -476,7 +467,7 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
    - Cajero (nombre)
    - Totales por forma de pago: Tarjeta CREDOMATIC, Tarjeta VISANET, Efectivo
    - Total de depósito bancario realizado
-   - Detalle de transacciones individuales con tarjeta
+   - Detalle de transacciones individuales con tarjeta (incluyendo nombre del cliente y monto)
 
 2. **Fotos de tickets NEONET y/o Credomatic** — son los resúmenes físicos de las transacciones de tarjeta que imprime el POS.
    - NEONET maneja típicamente VISA / MASTERCARD / etc.
@@ -484,6 +475,8 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
    - Cada ticket tiene fecha, terminal, lote, lista de transacciones y total
 
 3. **Fotos de boletas de depósito bancario** — comprobantes del Banco G&T Continental u otro banco donde se depositó el efectivo del día.
+   - **MUY IMPORTANTE**: Las boletas de banco frecuentemente tienen fecha del **día siguiente** al de los cierres del POS. Esto es normal y esperado: los cajeros cierran al final del día y depositan a la mañana siguiente. NO descartes una boleta solo porque tiene fecha de "día siguiente" o "lunes" después de cierres del viernes.
+   - El criterio para hacer match es **monto exacto** (con tolerancia de Q 1.00), no la fecha.
 
 **Tu tarea:** Cruzar los datos y producir un reporte de conciliación. Específicamente:
 
@@ -498,16 +491,22 @@ B) **Verifica que los totales de tarjeta cuadran con los tickets físicos:**
    - ¿La suma de VISANET del POS = total del ticket NEONET? (tolerancia Q 0.50)
 
 C) **Verifica que los depósitos bancarios cuadran con las boletas de banco:**
-   - Por cada PDF que declara un depósito, ¿existe una boleta de banco con monto coincidente?
-   - Lista boletas sin PDF correspondiente.
-   - Lista depósitos del PDF sin boleta correspondiente.
+   - Por cada PDF que declara un depósito, busca una boleta de banco con **monto coincidente** (tolerancia Q 1.00).
+   - **No descartes boletas por diferencia de fecha** — los depósitos casi siempre se hacen al día siguiente.
+   - Lista los depósitos sin boleta correspondiente (missing_slips).
+   - Lista boletas sin depósito correspondiente (orphan_slips).
 
 D) **Detecta cualquier inconsistencia interna del PDF:**
-   - Si un PDF muestra "Diferencia: Q X.XX" donde X > 0, repórtalo como alerta.
+   - Si un PDF muestra "Diferencia: Q X.XX" donde X > 0, repórtalo como alerta crítica.
    - Si hay múltiples montos contradictorios en un PDF (ej. dos líneas de "Total cobrado en Efectivo" con valores distintos), repórtalo.
 
 E) **Detecta duplicados:**
-   - Si dos PDFs comparten el mismo número POS/AAAA/MM/DD/NNNN, repórtalo.
+   - Si dos PDFs comparten el mismo número POS/AAAA/MM/DD/NNNN, repórtalo y cuenta los montos UNA SOLA VEZ.
+
+F) **Extrae clientes VIP:**
+   - Recorre las transacciones de TODOS los PDFs y lista los **clientes con montos individuales >= Q 200** (transacciones únicas grandes). No incluyas "CONSUMIDOR FINAL".
+   - Para cada uno: nombre del cliente, monto, cajero que lo atendió, tienda, método de pago.
+   - Ordena de mayor a menor monto.
 
 **Devuelve tu respuesta en JSON estructurado** con esta forma exacta (no agregues texto fuera del JSON):
 
@@ -557,7 +556,7 @@ E) **Detecta duplicados:**
     "bank_slips_total": 0.00,
     "difference": 0.00,
     "matched": [
-      {"pos_ref": "...", "pos_amount": 0.00, "slip_number": "...", "slip_amount": 0.00}
+      {"pos_ref": "...", "pos_amount": 0.00, "slip_number": "...", "slip_amount": 0.00, "slip_date": "..."}
     ],
     "missing_slips": [
       {"pos_ref": "...", "amount": 0.00, "cashier": "..."}
@@ -566,6 +565,16 @@ E) **Detecta duplicados:**
       {"slip_number": "...", "amount": 0.00, "date": "..."}
     ]
   },
+  "vip_clients": [
+    {
+      "name": "Nombre del cliente",
+      "amount": 0.00,
+      "cashier": "...",
+      "store": "6ta Avenida" | "7ma Avenida",
+      "payment_method": "CREDOMATIC" | "VISANET" | "Efectivo",
+      "pos_ref": "POS/2026/05/12/7488"
+    }
+  ],
   "findings": [
     {
       "severity": "ok" | "warn" | "alert",
@@ -576,7 +585,7 @@ E) **Detecta duplicados:**
 }
 ```
 
-**Sé extremadamente cuidadoso con los montos.** Estos son datos contables reales — un error tuyo puede causar problemas financieros. Si tienes la menor duda sobre algún número, reflejala en el campo `note` o como una alerta en `findings`. Mejor ser conservador y reportar dudas que asumir.
+**Sé extremadamente cuidadoso con los montos.** Estos son datos contables reales — un error tuyo puede causar problemas financieros. Si tienes la menor duda sobre algún número, refleja la duda en el campo `note` o como una alerta en `findings`. Mejor ser conservador y reportar dudas que asumir.
 
 Trabaja en GTQ (Quetzales guatemaltecos). Usa punto decimal."""
 
@@ -906,6 +915,45 @@ def _render_report(report: dict):
                     unsafe_allow_html=True,
                 )
 
+    # VIP clients
+    vips = report.get("vip_clients", [])
+    if vips:
+        st.markdown('<div class="cc-section-label">⭐ Clientes VIP del día '
+                    f'<span style="color:#6C7280;font-weight:500;">'
+                    f'({len(vips)} compras de Q 200+)</span></div>',
+                    unsafe_allow_html=True)
+        rows = []
+        for v in vips:
+            method = v.get("payment_method", "")
+            method_color = {
+                "CREDOMATIC": "#C9982A",
+                "VISANET": "#1D4ED8",
+                "Efectivo": "#1B7340",
+            }.get(method, "#6C7280")
+            rows.append(
+                f'<tr>'
+                f'<td><strong>{v.get("name","?")}</strong></td>'
+                f'<td class="amount">{_fmt_q(v.get("amount", 0))}</td>'
+                f'<td>{v.get("cashier","?")}</td>'
+                f'<td>{v.get("store","?")}</td>'
+                f'<td><span style="color:{method_color};font-weight:600;font-size:10px;">'
+                f'{method}</span></td>'
+                f'</tr>'
+            )
+        st.markdown(
+            '<table class="cc-table">'
+            '<thead><tr>'
+            '<th>Cliente</th>'
+            '<th style="text-align:right;">Monto</th>'
+            '<th>Cajero</th>'
+            '<th>Tienda</th>'
+            '<th>Pago</th>'
+            '</tr></thead><tbody>'
+            + "".join(rows) +
+            '</tbody></table>',
+            unsafe_allow_html=True,
+        )
+
     # General findings
     findings = report.get("findings", [])
     if findings:
@@ -1116,6 +1164,32 @@ def _build_report_pdf(report: dict, user_name: str) -> bytes:
                     body_style,
                 ))
 
+    # VIP clients
+    vips = report.get("vip_clients", [])
+    if vips:
+        story.append(Paragraph(f"⭐ Clientes VIP del día ({len(vips)} compras de Q 200+)", h2_style))
+        data = [["Cliente", "Monto", "Cajero", "Tienda", "Pago"]]
+        for v in vips:
+            data.append([
+                Paragraph(f'<b>{v.get("name","?")}</b>', body_style),
+                _fmt_q(v.get("amount", 0)),
+                v.get("cashier", "?"),
+                v.get("store", "?"),
+                v.get("payment_method", ""),
+            ])
+        t = Table(data, colWidths=[2.0*inch, 0.9*inch, 1.3*inch, 1.0*inch, 1.0*inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F6F7F9")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E8EBF0")),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(t)
+
     # Findings
     findings = report.get("findings", [])
     if findings:
@@ -1268,7 +1342,23 @@ def render(current_user: dict) -> None:
                 try:
                     report = _call_claude(pdfs, neonet, boletas)
                     st.session_state.cc_last_report = report
-                    st.success("✓ Análisis completo")
+                    # Save to history (Google Sheets)
+                    try:
+                        rid = cash_history.save_report(
+                            report,
+                            user_email=current_user["email"],
+                            n_pdfs=len(pdfs),
+                            n_neonet=len(neonet),
+                            n_boletas=len(boletas),
+                        )
+                        st.session_state.cc_last_report_id = rid
+                        st.success(f"✓ Análisis completo · Guardado en historial (ID: {rid})")
+                    except Exception as hist_err:
+                        st.success("✓ Análisis completo")
+                        st.warning(
+                            f"El análisis se generó, pero no se pudo guardar en "
+                            f"el historial. Detalle: `{hist_err}`"
+                        )
                 except Exception as e:
                     st.error(f"Error durante el análisis: `{e}`")
                     return
