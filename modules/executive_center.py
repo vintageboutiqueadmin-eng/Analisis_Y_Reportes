@@ -669,6 +669,156 @@ def _render_vip_tab(history: list[dict]):
 
 
 # ---------------------------------------------------------------------------
+# Tab 4: Pendientes
+# ---------------------------------------------------------------------------
+
+def _render_pending_tab(current_user: dict):
+    try:
+        pending = cash_history.list_pending(only_open=True)
+    except Exception as e:
+        st.error(f"No se pudo cargar la bandeja: `{e}`")
+        return
+
+    st.markdown(
+        "<div style='font-size:12px;color:#3D4554;line-height:1.6;margin-bottom:14px;'>"
+        "<strong>Bandeja de pendientes:</strong> aquí quedan boletas de banco sin "
+        "depósito correspondiente, y depósitos del POS sin boleta de banco. "
+        "<strong>La próxima vez que ejecutes un análisis</strong>, la IA intentará "
+        "automáticamente cuadrarlos con los nuevos archivos que subas (por monto)."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if not pending:
+        st.markdown(
+            '<div class="ce-empty">'
+            '<strong>✓ Bandeja vacía</strong>'
+            'No hay pendientes pendientes — todos los cierres están cuadrados.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        # Optionally show resolved history
+        with st.expander("Ver historial de resoluciones", expanded=False):
+            try:
+                all_p = cash_history.list_pending(only_open=False)
+                resolved_only = [p for p in all_p if p["status"] == "resolved"]
+            except Exception:
+                resolved_only = []
+            if not resolved_only:
+                st.caption("Aún no hay resoluciones registradas.")
+            else:
+                for p in resolved_only[:30]:
+                    ptype = "Boleta huérfana" if p["type"] == "boleta_huerfana" else "Depósito sin boleta"
+                    st.markdown(
+                        f"&nbsp;&nbsp;✓ **{ptype}** — {_fmt_q(p['amount'])} · "
+                        f"de `{p['origin_report_id']}` → resuelto en "
+                        f"`{p['resolved_in_report_id']}`"
+                    )
+        return
+
+    # Separate by type
+    boletas_huerfanas = [p for p in pending if p["type"] == "boleta_huerfana"]
+    depositos_sin_boleta = [p for p in pending if p["type"] == "deposito_sin_boleta"]
+
+    total_boletas = sum(p["amount"] for p in boletas_huerfanas)
+    total_depositos = sum(p["amount"] for p in depositos_sin_boleta)
+
+    # KPI mini cards
+    st.markdown(
+        f'<div class="ce-kpi-grid" style="grid-template-columns:repeat(3,1fr);">'
+        f'<div class="ce-kpi">'
+        f'<div class="ce-kpi-label">🧾 Boletas huérfanas</div>'
+        f'<div class="ce-kpi-value">{_fmt_q(total_boletas)}</div>'
+        f'<div class="ce-kpi-detail">{len(boletas_huerfanas)} boleta(s) sin depósito</div>'
+        f'</div>'
+
+        f'<div class="ce-kpi">'
+        f'<div class="ce-kpi-label">📤 Depósitos sin boleta</div>'
+        f'<div class="ce-kpi-value">{_fmt_q(total_depositos)}</div>'
+        f'<div class="ce-kpi-detail">{len(depositos_sin_boleta)} depósito(s) sin comprobante</div>'
+        f'</div>'
+
+        f'<div class="ce-kpi">'
+        f'<div class="ce-kpi-label">Diferencia neta</div>'
+        f'<div class="ce-kpi-value" style="color:{"#B91C1C" if total_boletas != total_depositos else "#1B7340"};">'
+        f'{_fmt_q(abs(total_depositos - total_boletas))}</div>'
+        f'<div class="ce-kpi-detail">'
+        f'{"Si cuadraran perfecto, sería Q 0.00" if total_boletas != total_depositos else "✓ Cuadran"}'
+        f'</div></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Boletas huérfanas
+    if boletas_huerfanas:
+        st.markdown(
+            "<div style='margin:18px 0 10px;font-size:11px;letter-spacing:2px;"
+            "text-transform:uppercase;color:#0B0F19;font-weight:700;'>"
+            f"🧾 Boletas huérfanas ({len(boletas_huerfanas)})</div>",
+            unsafe_allow_html=True,
+        )
+        for p in boletas_huerfanas:
+            d = p.get("details", {})
+            col_main, col_action = st.columns([5, 1])
+            with col_main:
+                st.markdown(
+                    f'<div class="ce-history-row">'
+                    f'<div class="ce-history-status-dot warning"></div>'
+                    f'<div class="ce-history-date">J No. {d.get("slip_number", "?")}<br>'
+                    f'<span style="font-size:10px;color:#6C7280;font-weight:400;">'
+                    f'Boleta del {d.get("date", "?")}</span></div>'
+                    f'<div class="ce-history-summary">'
+                    f'Origen: cierre <code>{p["origin_report_id"]}</code> '
+                    f'(reporte del {p["origin_date"]})'
+                    f'</div>'
+                    f'<div class="ce-history-amount">{_fmt_q(p["amount"])}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with col_action:
+                if current_user["role"] == "admin":
+                    if st.button("🗑", key=f"del_pend_{p['id']}",
+                                 help="Eliminar este pendiente"):
+                        if cash_history.delete_pending(p["id"]):
+                            st.success("Eliminado")
+                            st.rerun()
+
+    # Depósitos sin boleta
+    if depositos_sin_boleta:
+        st.markdown(
+            "<div style='margin:18px 0 10px;font-size:11px;letter-spacing:2px;"
+            "text-transform:uppercase;color:#0B0F19;font-weight:700;'>"
+            f"📤 Depósitos sin boleta ({len(depositos_sin_boleta)})</div>",
+            unsafe_allow_html=True,
+        )
+        for p in depositos_sin_boleta:
+            d = p.get("details", {})
+            col_main, col_action = st.columns([5, 1])
+            with col_main:
+                st.markdown(
+                    f'<div class="ce-history-row">'
+                    f'<div class="ce-history-status-dot warning"></div>'
+                    f'<div class="ce-history-date">{d.get("pos_ref", "?")}<br>'
+                    f'<span style="font-size:10px;color:#6C7280;font-weight:400;">'
+                    f'{d.get("cashier", "?")}</span></div>'
+                    f'<div class="ce-history-summary">'
+                    f'Origen: cierre <code>{p["origin_report_id"]}</code> '
+                    f'(reporte del {p["origin_date"]})'
+                    f'</div>'
+                    f'<div class="ce-history-amount">{_fmt_q(p["amount"])}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with col_action:
+                if current_user["role"] == "admin":
+                    if st.button("🗑", key=f"del_pend_{p['id']}",
+                                 help="Eliminar este pendiente"):
+                        if cash_history.delete_pending(p["id"]):
+                            st.success("Eliminado")
+                            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main render
 # ---------------------------------------------------------------------------
 
@@ -699,10 +849,11 @@ def render(current_user: dict) -> None:
         return
 
     # Tabs
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Resumen",
         "📚 Historial",
         "⭐ Clientes VIP",
+        "⏳ Pendientes",
     ])
 
     with tab1:
@@ -711,3 +862,5 @@ def render(current_user: dict) -> None:
         _render_history_tab(history, current_user)
     with tab3:
         _render_vip_tab(history)
+    with tab4:
+        _render_pending_tab(current_user)
