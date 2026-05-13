@@ -49,13 +49,22 @@ def get_drive_service():
 
 def _root_folder_id() -> str:
     try:
-        return st.secrets["drive"]["root_folder_id"]
+        raw = st.secrets["drive"]["root_folder_id"]
     except Exception:
         raise RuntimeError(
             "Falta `[drive] root_folder_id` en los secrets. "
             "El admin debe crear una carpeta de Google Drive y compartirla con la "
             "cuenta de servicio, luego copiar el ID de la URL aquí."
         )
+    # Be lenient: accept full Drive URLs and extract the ID
+    s = str(raw).strip()
+    if "/folders/" in s:
+        s = s.split("/folders/", 1)[1]
+    if "?" in s:
+        s = s.split("?", 1)[0]
+    if "/" in s:
+        s = s.split("/", 1)[0]
+    return s.strip()
 
 
 # ---------------------------------------------------------------------------
