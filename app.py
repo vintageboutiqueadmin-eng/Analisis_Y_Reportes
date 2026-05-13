@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from modules import auth, dashboard, capture, admin, cash_reports
+from modules import auth, dashboard, capture, admin, cash_reports, executive_center
 
 st.set_page_config(
     page_title="Vintage Boutique · Asistencia",
@@ -61,8 +61,9 @@ def render_role_nav(user: dict) -> str:
     pages = []
     if role == auth.ROLE_VIEWER:
         pages = [
-            ("dashboard",    "Dashboard"),
-            ("cash_reports", "Cierres de Caja"),
+            ("dashboard",         "Dashboard Asistencia"),
+            ("cash_reports",      "Cierres de Caja"),
+            ("executive_center",  "Centro Ejecutivo"),
         ]
     elif role == auth.ROLE_MANAGER:
         pages = [
@@ -71,10 +72,11 @@ def render_role_nav(user: dict) -> str:
         ]
     elif role == auth.ROLE_ADMIN:
         pages = [
-            ("dashboard",    "Dashboard"),
-            ("capture",      "Captura de Asistencia"),
-            ("cash_reports", "Cierres de Caja"),
-            ("admin",        "Administración"),
+            ("dashboard",         "Dashboard Asistencia"),
+            ("capture",           "Captura de Asistencia"),
+            ("cash_reports",      "Cierres de Caja"),
+            ("executive_center",  "Centro Ejecutivo"),
+            ("admin",             "Administración"),
         ]
 
     if not pages:
@@ -137,6 +139,11 @@ def main() -> None:
             st.error("No tienes permisos para acceder a esta sección.")
             return
         cash_reports.render(user)
+    elif page == "executive_center":
+        if user["role"] not in (auth.ROLE_ADMIN, auth.ROLE_VIEWER):
+            st.error("No tienes permisos para acceder a esta sección.")
+            return
+        executive_center.render(user)
     elif page == "admin":
         if user["role"] != auth.ROLE_ADMIN:
             st.error("No tienes permisos para acceder a esta sección.")
