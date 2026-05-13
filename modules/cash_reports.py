@@ -372,58 +372,43 @@ def _render_section_2_neonet(folder_ids: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    tab1, tab2 = st.tabs(["📷 Tomar foto", "📤 Subir archivo"])
+    st.caption(
+        "📱 En el celular: el botón abre tu cámara o galería. "
+        "💻 En computadora: te deja seleccionar archivos del disco."
+    )
 
-    with tab1:
-        captured = st.camera_input(
-            "Apunta la cámara al ticket",
-            key="cam_neonet",
-            label_visibility="collapsed",
-        )
-        if captured:
-            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S")
-            filename = f"neonet_camera_{ts}.jpg"
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("⬆ Guardar foto", use_container_width=True,
-                             type="primary", key="save_neonet_cam"):
-                    try:
-                        data = captured.getvalue()
+    uploaded = st.file_uploader(
+        "Subir o tomar foto(s) de NEONET / Credomatic",
+        type=["jpg", "jpeg", "png", "heic", "heif"],
+        accept_multiple_files=True,
+        key="upload_neonet",
+        label_visibility="collapsed",
+    )
+    if uploaded:
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("⬆ Subir a Drive", use_container_width=True,
+                         type="primary", key="upload_neonet_btn"):
+                try:
+                    for up in uploaded:
+                        up.seek(0)
+                        data = up.read()
+                        mime = up.type or "image/jpeg"
+                        # If the file came from camera with a generic name, rename with timestamp
+                        name = up.name
+                        if name.lower() in ("image.jpg", "image.jpeg", "image.png", "photo.jpg"):
+                            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S")
+                            ext = name.rsplit(".", 1)[-1].lower()
+                            name = f"neonet_{ts}.{ext}"
                         drive_storage.upload_file(
-                            folder_ids["neonet"], filename, data, "image/jpeg",
+                            folder_ids["neonet"], name, data, mime,
                         )
-                        st.success(f"✓ Foto guardada: {filename}")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: `{e}`")
-            with col1:
-                st.caption(f"Se guardará como `{filename}`")
-
-    with tab2:
-        uploaded = st.file_uploader(
-            "Subir foto(s)",
-            type=["jpg", "jpeg", "png", "heic", "heif"],
-            accept_multiple_files=True,
-            key="upload_neonet",
-            label_visibility="collapsed",
-        )
-        if uploaded:
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("⬆ Subir fotos", use_container_width=True,
-                             type="primary", key="upload_neonet_btn"):
-                    try:
-                        for up in uploaded:
-                            up.seek(0)
-                            data = up.read()
-                            mime = up.type or "image/jpeg"
-                            drive_storage.upload_file(
-                                folder_ids["neonet"], up.name, data, mime,
-                            )
-                        st.success(f"✓ {len(uploaded)} fotos subidas")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: `{e}`")
+                    st.success(f"✓ {len(uploaded)} foto(s) subida(s)")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+        with col1:
+            st.caption(f"Listo para subir: **{len(uploaded)} archivo(s)**")
 
     st.markdown(
         '<div style="margin-top:18px;font-size:11px;letter-spacing:2px;'
@@ -445,58 +430,42 @@ def _render_section_3_boletas(folder_ids: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    tab1, tab2 = st.tabs(["📷 Tomar foto", "📤 Subir archivo"])
+    st.caption(
+        "📱 En el celular: el botón abre tu cámara o galería. "
+        "💻 En computadora: te deja seleccionar archivos del disco."
+    )
 
-    with tab1:
-        captured = st.camera_input(
-            "Apunta la cámara a la boleta",
-            key="cam_boletas",
-            label_visibility="collapsed",
-        )
-        if captured:
-            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S")
-            filename = f"boleta_camera_{ts}.jpg"
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("⬆ Guardar foto", use_container_width=True,
-                             type="primary", key="save_boleta_cam"):
-                    try:
-                        data = captured.getvalue()
+    uploaded = st.file_uploader(
+        "Subir o tomar foto(s) de boletas de banco",
+        type=["jpg", "jpeg", "png", "heic", "heif"],
+        accept_multiple_files=True,
+        key="upload_boletas",
+        label_visibility="collapsed",
+    )
+    if uploaded:
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("⬆ Subir a Drive", use_container_width=True,
+                         type="primary", key="upload_boletas_btn"):
+                try:
+                    for up in uploaded:
+                        up.seek(0)
+                        data = up.read()
+                        mime = up.type or "image/jpeg"
+                        name = up.name
+                        if name.lower() in ("image.jpg", "image.jpeg", "image.png", "photo.jpg"):
+                            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S")
+                            ext = name.rsplit(".", 1)[-1].lower()
+                            name = f"boleta_{ts}.{ext}"
                         drive_storage.upload_file(
-                            folder_ids["boletas"], filename, data, "image/jpeg",
+                            folder_ids["boletas"], name, data, mime,
                         )
-                        st.success(f"✓ Foto guardada: {filename}")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: `{e}`")
-            with col1:
-                st.caption(f"Se guardará como `{filename}`")
-
-    with tab2:
-        uploaded = st.file_uploader(
-            "Subir foto(s)",
-            type=["jpg", "jpeg", "png", "heic", "heif"],
-            accept_multiple_files=True,
-            key="upload_boletas",
-            label_visibility="collapsed",
-        )
-        if uploaded:
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("⬆ Subir fotos", use_container_width=True,
-                             type="primary", key="upload_boletas_btn"):
-                    try:
-                        for up in uploaded:
-                            up.seek(0)
-                            data = up.read()
-                            mime = up.type or "image/jpeg"
-                            drive_storage.upload_file(
-                                folder_ids["boletas"], up.name, data, mime,
-                            )
-                        st.success(f"✓ {len(uploaded)} fotos subidas")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: `{e}`")
+                    st.success(f"✓ {len(uploaded)} foto(s) subida(s)")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+        with col1:
+            st.caption(f"Listo para subir: **{len(uploaded)} archivo(s)**")
 
     st.markdown(
         '<div style="margin-top:18px;font-size:11px;letter-spacing:2px;'
