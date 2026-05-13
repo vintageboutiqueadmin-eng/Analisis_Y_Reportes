@@ -1,39 +1,85 @@
 """
-Reporte de Cierres de Caja — Fase 1: Subida y almacenamiento.
+Reporte de Cierres de Caja.
 
-3 secciones:
-  1. PDFs Cierre de Caja        → file_uploader (múltiples PDFs)
-  2. Foto NEONET / Credomatic  → camera_input + file_uploader
-  3. Boletas de Banco           → camera_input + file_uploader
-
-Features:
-  - Detección automática de PDFs duplicados (mismo número de cierre POS/AAAA/MM/DD/NNNN)
-  - Almacenamiento en Google Drive organizado por fecha
-  - Historial: lista de cierres ya procesados, con acceso rápido
-  - Fase 2 (próxima): botón "Analizar y conciliar" con Claude
+Flow:
+  1. Lic uploads PDFs of cash closings + photos of NEONET/Credomatic + photos of bank deposit slips
+  2. All files stay in st.session_state (not persisted)
+  3. Click "Analizar con IA" -> Claude Opus 4.7 reads everything via vision API
+  4. Renders reconciliation summary with green/yellow/red cards
+  5. User downloads the final PDF report
 """
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import io
+import json
 import re
 from zoneinfo import ZoneInfo
 
 import streamlit as st
 
-from . import drive_storage
-
 
 GT_TZ = ZoneInfo("America/Guatemala")
 
 
-def _today_gt() -> dt.date:
-    return dt.datetime.now(GT_TZ).date()
+# ---------------------------------------------------------------------------
+# Session-state helpers — files live here, not on disk
+# ---------------------------------------------------------------------------
+
+def _bucket(key: str) -> list:
+    """Get (and lazily init) a list of saved files in session state."""
+    if key not in st.session_state:
+        st.session_state[key] = []
+    return st.session_state[key]
+
+
+def _add_files(bucket_key: str, uploads, rename_prefix: str | None = None) -> int:
+    """Persist uploaded files to session_state. Returns count added."""
+    if not uploads:
+        return 0
+    bucket = _bucket(bucket_key)
+    existing_names = {f["name"] for f in bucket}
+    added = 0
+    for up in uploads:
+        up.seek(0)
+        data = up.read()
+        up.seek(0)
+        name = up.name
+        # Auto-rename generic camera names
+        if rename_prefix and name.lower() in (
+            "image.jpg", "image.jpeg", "image.png", "photo.jpg", "photo.jpeg",
+        ):
+            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            ext = name.rsplit(".", 1)[-1].lower()
+            name = f"{rename_prefix}_{ts}.{ext}"
+        # Avoid exact duplicates
+        if name in existing_names:
+            continue
+        bucket.append({
+            "name": name,
+            "data": data,
+            "mime": up.type or "application/octet-stream",
+            "size": len(data),
+        })
+        existing_names.add(name)
+        added += 1
+    return added
+
+
+def _clear_bucket(bucket_key: str):
+    st.session_state[bucket_key] = []
+
+
+def _remove_from_bucket(bucket_key: str, idx: int):
+    bucket = _bucket(bucket_key)
+    if 0 <= idx < len(bucket):
+        bucket.pop(idx)
 
 
 # ---------------------------------------------------------------------------
-# Page CSS
+# CSS
 # ---------------------------------------------------------------------------
 
 _CSS = """
@@ -58,7 +104,7 @@ html, body, [class*="css"], button, input, select, textarea {
 
 .cc-section {
     background: #FFFFFF; border: 1px solid #D8DCE2; border-radius: 6px;
-    padding: 20px 22px; margin-bottom: 20px;
+    padding: 20px 22px; margin-bottom: 18px;
 }
 .cc-section-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .cc-section-number {
@@ -72,13 +118,6 @@ html, body, [class*="css"], button, input, select, textarea {
 }
 .cc-section-desc {
     font-size: 12px; color: #6C7280; margin-top: 2px;
-}
-
-.cc-counter {
-    display: inline-block; padding: 3px 9px; border-radius: 3px;
-    background: #F6F7F9; color: #0B0F19; font-size: 11px;
-    font-weight: 700; letter-spacing: 1px; margin-left: auto;
-    font-family: 'Geist Mono', monospace;
 }
 
 .cc-file-card {
@@ -106,25 +145,115 @@ html, body, [class*="css"], button, input, select, textarea {
 .cc-dup-body { font-size: 12.5px; color: #5C2A0E; line-height: 1.5; }
 
 .cc-empty {
-    text-align: center; padding: 24px; color: #9CA3AF;
+    text-align: center; padding: 18px; color: #9CA3AF;
     font-size: 12px; font-style: italic;
 }
 
-.cc-history-card {
-    background: #FFFFFF; border: 1px solid #D8DCE2; border-radius: 6px;
-    padding: 14px 18px; margin-bottom: 8px;
-    display: flex; align-items: center; justify-content: space-between;
+.cc-analyze-cta {
+    background: linear-gradient(135deg, #0B0F19 0%, #1F2937 100%);
+    color: #FFFFFF; padding: 22px 26px; border-radius: 8px;
+    margin: 22px 0; text-align: center;
 }
-.cc-history-date {
-    font-size: 14px; font-weight: 600; color: #0B0F19;
-    font-family: 'Geist Mono', monospace;
+.cc-analyze-cta h3 {
+    font-size: 18px; font-weight: 600; letter-spacing: -0.3px;
+    margin-bottom: 6px; color: #FFF;
 }
-.cc-history-status {
-    font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
-    font-weight: 700; padding: 3px 9px; border-radius: 3px;
+.cc-analyze-cta p {
+    font-size: 12.5px; color: #9CA3AF; margin-bottom: 14px; line-height: 1.5;
 }
-.cc-history-status.analyzed { background: #D1FADF; color: #1B7340; }
-.cc-history-status.pending { background: #FEF3C7; color: #92400E; }
+.cc-analyze-cta .cta-gold {
+    color: #E8C063; font-weight: 600;
+}
+
+/* ===== Report cards ===== */
+.cc-report { background: #FFFFFF; border: 1px solid #D8DCE2;
+  border-radius: 6px; padding: 26px; margin-top: 22px; }
+.cc-report-header {
+  padding-bottom: 16px; margin-bottom: 18px;
+  border-bottom: 1px solid #D8DCE2;
+}
+.cc-report-eyebrow {
+  font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase;
+  color: #6C7280; font-weight: 600; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 9px;
+}
+.cc-report-eyebrow::before {
+  content: ''; width: 14px; height: 1px; background: #C9982A;
+}
+.cc-report-title {
+  font-size: 22px; font-weight: 600; letter-spacing: -0.5px;
+  color: #0B0F19; line-height: 1.2;
+}
+.cc-report-date {
+  font-size: 12px; color: #3D4554; font-weight: 500;
+  font-family: 'Geist Mono', monospace; margin-top: 6px;
+}
+
+.cc-overall {
+  padding: 18px 22px; border-radius: 6px; margin-bottom: 18px;
+}
+.cc-overall.green {
+  background: #ECFDF5; border: 1px solid #6EE7B7;
+  border-left: 4px solid #059669;
+}
+.cc-overall.yellow {
+  background: #FFFBEB; border: 1px solid #FCD34D;
+  border-left: 4px solid #D97706;
+}
+.cc-overall.red {
+  background: #FEF2F2; border: 1px solid #FCA5A5;
+  border-left: 4px solid #DC2626;
+}
+.cc-overall-title {
+  font-size: 14px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase; margin-bottom: 6px;
+}
+.cc-overall.green .cc-overall-title { color: #065F46; }
+.cc-overall.yellow .cc-overall-title { color: #92400E; }
+.cc-overall.red .cc-overall-title { color: #991B1B; }
+.cc-overall-body { font-size: 13px; line-height: 1.55; }
+.cc-overall.green .cc-overall-body { color: #064E3B; }
+.cc-overall.yellow .cc-overall-body { color: #78350F; }
+.cc-overall.red .cc-overall-body { color: #7F1D1D; }
+
+.cc-finding {
+  padding: 14px 16px; border-radius: 4px; margin-bottom: 8px;
+  border-left: 3px solid;
+}
+.cc-finding.ok { background: #F0FDF4; border-color: #16A34A; }
+.cc-finding.warn { background: #FFFBEB; border-color: #D97706; }
+.cc-finding.alert { background: #FEF2F2; border-color: #DC2626; }
+.cc-finding-title {
+  font-size: 12.5px; font-weight: 600; margin-bottom: 4px;
+}
+.cc-finding.ok .cc-finding-title { color: #15803D; }
+.cc-finding.warn .cc-finding-title { color: #B45309; }
+.cc-finding.alert .cc-finding-title { color: #B91C1C; }
+.cc-finding-body { font-size: 12px; color: #3D4554; line-height: 1.5; }
+
+.cc-table {
+  width: 100%; border-collapse: collapse; margin: 14px 0;
+  font-family: 'Geist Mono', monospace; font-size: 11.5px;
+}
+.cc-table th {
+  background: #F6F7F9; color: #0B0F19; padding: 9px 12px;
+  text-align: left; border-bottom: 1px solid #D8DCE2;
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 1.5px;
+  font-weight: 600;
+}
+.cc-table td {
+  padding: 9px 12px; border-bottom: 1px solid #E8EBF0;
+  color: #0B0F19;
+}
+.cc-table td.amount { text-align: right; font-weight: 500; }
+.cc-table tr:last-child td { border-bottom: none; }
+.cc-table tr.total td { background: #FAFBFC; font-weight: 700; }
+
+.cc-section-label {
+  font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+  color: #0B0F19; font-weight: 700; margin: 22px 0 10px;
+  padding-bottom: 6px; border-bottom: 1px solid #E8EBF0;
+}
 </style>
 """
 
@@ -136,8 +265,11 @@ html, body, [class*="css"], button, input, select, textarea {
 POS_REF_PATTERN = re.compile(r"POS/\d{4}/\d{2}/\d{2}/(\d{4,})")
 
 
+def _today_gt() -> dt.date:
+    return dt.datetime.now(GT_TZ).date()
+
+
 def _extract_pos_ref(pdf_bytes: bytes) -> str | None:
-    """Extract the POS/YYYY/MM/DD/NNNN reference from a PDF's first page."""
     try:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -151,7 +283,6 @@ def _extract_pos_ref(pdf_bytes: bytes) -> str | None:
 
 
 def _extract_pos_date(pdf_bytes: bytes) -> dt.date | None:
-    """Extract the date from the POS reference (POS/2026/05/12/7488 → 2026-05-12)."""
     ref = _extract_pos_ref(pdf_bytes)
     if not ref:
         return None
@@ -162,25 +293,13 @@ def _extract_pos_date(pdf_bytes: bytes) -> dt.date | None:
         return None
 
 
-def _fmt_size(n_bytes) -> str:
-    try:
-        n = int(n_bytes)
-    except (ValueError, TypeError):
-        return ""
+def _fmt_size(n_bytes: int) -> str:
+    n = float(n_bytes or 0)
     for unit in ["B", "KB", "MB"]:
         if n < 1024:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
-
-
-def _fmt_drive_date(s: str) -> str:
-    """Format a Drive ISO timestamp like '2026-05-13T09:48:00Z' → '13 May 09:48'."""
-    try:
-        d = dt.datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(GT_TZ)
-        return d.strftime("%d %b %H:%M")
-    except Exception:
-        return s
 
 
 def _file_icon(mime: str) -> str:
@@ -195,329 +314,838 @@ def _file_icon(mime: str) -> str:
 # Section renderers
 # ---------------------------------------------------------------------------
 
-def _render_existing_files(folder_id: str) -> None:
-    """List files currently in a Drive folder, with delete button."""
-    try:
-        files = drive_storage.list_folder(folder_id)
-    except Exception as e:
-        st.error(f"No se pudo listar archivos: `{e}`")
-        return
-
-    if not files:
+def _render_file_list(bucket_key: str):
+    """List files saved in session_state with remove buttons."""
+    bucket = _bucket(bucket_key)
+    if not bucket:
         st.markdown(
-            '<div class="cc-empty">Sin archivos. Sube algunos arriba.</div>',
+            '<div class="cc-empty">No hay archivos cargados aún.</div>',
             unsafe_allow_html=True,
         )
         return
 
-    for f in files:
+    for i, f in enumerate(bucket):
         cols = st.columns([10, 1])
         with cols[0]:
             st.markdown(
                 f'<div class="cc-file-card">'
-                f'<div class="cc-file-icon">{_file_icon(f.get("mimeType", ""))}</div>'
+                f'<div class="cc-file-icon">{_file_icon(f["mime"])}</div>'
                 f'<div class="cc-file-info">'
                 f'<div class="cc-file-name">{f["name"]}</div>'
-                f'<div class="cc-file-meta">'
-                f'{_fmt_drive_date(f.get("modifiedTime",""))} · '
-                f'{_fmt_size(f.get("size",0))}'
-                f'</div></div></div>',
+                f'<div class="cc-file-meta">{_fmt_size(f["size"])} · {f["mime"]}</div>'
+                f'</div></div>',
                 unsafe_allow_html=True,
             )
         with cols[1]:
-            if st.button("🗑", key=f"del_{f['id']}", help="Eliminar archivo"):
-                try:
-                    drive_storage.delete_file(f["id"])
-                    st.success(f"Eliminado: {f['name']}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: `{e}`")
+            if st.button("🗑", key=f"rm_{bucket_key}_{i}", help="Quitar archivo"):
+                _remove_from_bucket(bucket_key, i)
+                st.rerun()
 
 
-def _detect_pdf_duplicates(uploads: list) -> dict[str, list]:
-    """
-    Group uploaded PDFs by their POS reference number.
-    Returns dict {ref: [upload, ...]} only for duplicates (>=2 with same ref).
-    """
+def _detect_pdf_duplicates(bucket_key: str) -> dict[str, list[int]]:
+    """Find PDFs in the bucket that share the same POS reference."""
+    bucket = _bucket(bucket_key)
     grouped = {}
-    for up in uploads:
-        try:
-            up.seek(0)
-            data = up.read()
-            up.seek(0)
-            ref = _extract_pos_ref(data) or f"(sin referencia detectada: {up.name})"
-            grouped.setdefault(ref, []).append((up, data))
-        except Exception:
-            grouped.setdefault(f"(error leyendo: {up.name})", []).append((up, b""))
+    for i, f in enumerate(bucket):
+        if "pdf" not in f["mime"]:
+            continue
+        ref = _extract_pos_ref(f["data"]) or "(sin referencia)"
+        grouped.setdefault(ref, []).append(i)
     return {k: v for k, v in grouped.items() if len(v) >= 2}
 
 
-def _render_section_1_pdfs(folder_ids: dict) -> None:
-    """Section 1: PDFs upload + duplicate detection."""
+def _render_section_pdfs():
     st.markdown(
         '<div class="cc-section-head">'
         '<div class="cc-section-number">1</div>'
         '<div><div class="cc-section-title">PDFs Cierre de Caja</div>'
-        '<div class="cc-section-desc">Reportes del POS exportados directamente del sistema.</div>'
+        '<div class="cc-section-desc">Reportes del POS exportados directamente.</div>'
         '</div></div>',
         unsafe_allow_html=True,
     )
 
     uploaded = st.file_uploader(
-        "Arrastra los PDFs o haz click para seleccionarlos",
+        "Arrastra o selecciona los PDFs",
         type=["pdf"],
         accept_multiple_files=True,
-        key="upload_pdfs",
+        key="cc_upload_pdfs",
         label_visibility="collapsed",
     )
 
     if uploaded:
-        # Detect duplicates BEFORE uploading
-        duplicates = _detect_pdf_duplicates(uploaded)
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("➕ Agregar", use_container_width=True,
+                         type="primary", key="add_pdfs_btn"):
+                n = _add_files("cc_pdfs", uploaded)
+                if n:
+                    st.success(f"✓ {n} PDF(s) agregado(s)")
+                else:
+                    st.info("Todos los archivos ya estaban cargados.")
+                st.rerun()
+        with col1:
+            st.caption(
+                f"**{len(uploaded)}** archivo(s) listos. "
+                "Cada PDF se identifica por su número de cierre (POS/AAAA/MM/DD/NNNN)."
+            )
 
-        if duplicates:
+    # Show duplicates warning
+    dups = _detect_pdf_duplicates("cc_pdfs")
+    if dups:
+        st.markdown(
+            '<div class="cc-dup-warning">'
+            '<div class="cc-dup-title">⚠ Detectamos duplicados</div>'
+            '<div class="cc-dup-body">'
+            'Hay varios PDFs con el mismo número de cierre. Quita los duplicados '
+            'antes de analizar para no contar montos dos veces.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+        bucket = _bucket("cc_pdfs")
+        for ref, indices in dups.items():
+            st.markdown(f"**Cierre duplicado: `{ref}`** — {len(indices)} archivos:")
+            for idx in indices:
+                f = bucket[idx]
+                st.markdown(f"&nbsp;&nbsp;• `{f['name']}` ({_fmt_size(f['size'])})")
+
+    st.markdown(
+        '<div style="margin-top:14px;font-size:11px;letter-spacing:2px;'
+        'text-transform:uppercase;color:#6C7280;font-weight:600;">'
+        'PDFs cargados</div>',
+        unsafe_allow_html=True,
+    )
+    _render_file_list("cc_pdfs")
+
+
+def _render_section_photos(bucket_key: str, section_number: int,
+                            title: str, desc: str, rename_prefix: str):
+    st.markdown(
+        f'<div class="cc-section-head">'
+        f'<div class="cc-section-number">{section_number}</div>'
+        f'<div><div class="cc-section-title">{title}</div>'
+        f'<div class="cc-section-desc">{desc}</div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        "📱 En el celular: el botón abre tu cámara o galería. "
+        "💻 En computadora: te deja seleccionar archivos del disco."
+    )
+
+    uploaded = st.file_uploader(
+        f"Subir foto(s) — {title}",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key=f"cc_upload_{bucket_key}",
+        label_visibility="collapsed",
+    )
+
+    if uploaded:
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("➕ Agregar", use_container_width=True,
+                         type="primary", key=f"add_{bucket_key}_btn"):
+                n = _add_files(bucket_key, uploaded, rename_prefix=rename_prefix)
+                if n:
+                    st.success(f"✓ {n} foto(s) agregada(s)")
+                else:
+                    st.info("Esas fotos ya estaban cargadas.")
+                st.rerun()
+        with col1:
+            st.caption(f"**{len(uploaded)}** archivo(s) listos para agregar.")
+
+    st.markdown(
+        '<div style="margin-top:14px;font-size:11px;letter-spacing:2px;'
+        'text-transform:uppercase;color:#6C7280;font-weight:600;">'
+        'Fotos cargadas</div>',
+        unsafe_allow_html=True,
+    )
+    _render_file_list(bucket_key)
+
+
+# ---------------------------------------------------------------------------
+# Analysis with Claude
+# ---------------------------------------------------------------------------
+
+ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minoristas. Te entregaré tres tipos de documentos del cierre de caja diario de Vintage Boutique (Antigua Guatemala):
+
+1. **PDFs de cierre de caja del POS** — uno por cada cajero. Cada uno contiene:
+   - Número de referencia POS/AAAA/MM/DD/NNNN
+   - Tienda (6ta Avenida o 7ma Avenida)
+   - Cajero (nombre)
+   - Totales por forma de pago: Tarjeta CREDOMATIC, Tarjeta VISANET, Efectivo
+   - Total de depósito bancario realizado
+   - Detalle de transacciones individuales con tarjeta
+
+2. **Fotos de tickets NEONET y/o Credomatic** — son los resúmenes físicos de las transacciones de tarjeta que imprime el POS.
+   - NEONET maneja típicamente VISA / MASTERCARD / etc.
+   - Credomatic es procesador separado.
+   - Cada ticket tiene fecha, terminal, lote, lista de transacciones y total
+
+3. **Fotos de boletas de depósito bancario** — comprobantes del Banco G&T Continental u otro banco donde se depositó el efectivo del día.
+
+**Tu tarea:** Cruzar los datos y producir un reporte de conciliación. Específicamente:
+
+A) **Suma total por forma de pago según los PDFs:**
+   - CREDOMATIC total (suma de los PDFs)
+   - VISANET / NEONET total (suma de los PDFs)
+   - Efectivo total (suma de los PDFs)
+   - Depósitos bancarios total (suma de los PDFs)
+
+B) **Verifica que los totales de tarjeta cuadran con los tickets físicos:**
+   - ¿La suma de CREDOMATIC del POS = total del ticket Credomatic? (tolerancia Q 0.50)
+   - ¿La suma de VISANET del POS = total del ticket NEONET? (tolerancia Q 0.50)
+
+C) **Verifica que los depósitos bancarios cuadran con las boletas de banco:**
+   - Por cada PDF que declara un depósito, ¿existe una boleta de banco con monto coincidente?
+   - Lista boletas sin PDF correspondiente.
+   - Lista depósitos del PDF sin boleta correspondiente.
+
+D) **Detecta cualquier inconsistencia interna del PDF:**
+   - Si un PDF muestra "Diferencia: Q X.XX" donde X > 0, repórtalo como alerta.
+   - Si hay múltiples montos contradictorios en un PDF (ej. dos líneas de "Total cobrado en Efectivo" con valores distintos), repórtalo.
+
+E) **Detecta duplicados:**
+   - Si dos PDFs comparten el mismo número POS/AAAA/MM/DD/NNNN, repórtalo.
+
+**Devuelve tu respuesta en JSON estructurado** con esta forma exacta (no agregues texto fuera del JSON):
+
+```json
+{
+  "report_date": "YYYY-MM-DD",
+  "overall_status": "ok" | "warning" | "error",
+  "overall_summary": "Resumen ejecutivo en 2-3 líneas, en español.",
+  "totals_from_pdfs": {
+    "credomatic": 0.00,
+    "visanet": 0.00,
+    "efectivo": 0.00,
+    "depositos_bancarios": 0.00,
+    "total_ventas": 0.00
+  },
+  "cashier_breakdown": [
+    {
+      "store": "6ta Avenida" | "7ma Avenida",
+      "cashier": "Nombre del cajero",
+      "pos_ref": "POS/2026/05/12/7488",
+      "credomatic": 0.00,
+      "visanet": 0.00,
+      "efectivo": 0.00,
+      "deposito": 0.00,
+      "diferencia_interna": 0.00,
+      "notes": ""
+    }
+  ],
+  "card_reconciliation": {
+    "credomatic": {
+      "pos_total": 0.00,
+      "ticket_total": 0.00,
+      "difference": 0.00,
+      "status": "ok" | "warning" | "error",
+      "note": ""
+    },
+    "visanet_neonet": {
+      "pos_total": 0.00,
+      "ticket_total": 0.00,
+      "difference": 0.00,
+      "status": "ok" | "warning" | "error",
+      "note": ""
+    }
+  },
+  "bank_reconciliation": {
+    "pos_deposits_total": 0.00,
+    "bank_slips_total": 0.00,
+    "difference": 0.00,
+    "matched": [
+      {"pos_ref": "...", "pos_amount": 0.00, "slip_number": "...", "slip_amount": 0.00}
+    ],
+    "missing_slips": [
+      {"pos_ref": "...", "amount": 0.00, "cashier": "..."}
+    ],
+    "orphan_slips": [
+      {"slip_number": "...", "amount": 0.00, "date": "..."}
+    ]
+  },
+  "findings": [
+    {
+      "severity": "ok" | "warn" | "alert",
+      "title": "Título corto",
+      "detail": "Descripción detallada del hallazgo."
+    }
+  ]
+}
+```
+
+**Sé extremadamente cuidadoso con los montos.** Estos son datos contables reales — un error tuyo puede causar problemas financieros. Si tienes la menor duda sobre algún número, reflejala en el campo `note` o como una alerta en `findings`. Mejor ser conservador y reportar dudas que asumir.
+
+Trabaja en GTQ (Quetzales guatemaltecos). Usa punto decimal."""
+
+
+def _to_base64(data: bytes) -> str:
+    return base64.standard_b64encode(data).decode("utf-8")
+
+
+def _build_anthropic_content(pdfs: list, neonet: list, boletas: list) -> list:
+    """Build the content blocks for the Anthropic API call."""
+    blocks = []
+
+    # Section 1: PDFs
+    if pdfs:
+        blocks.append({
+            "type": "text",
+            "text": f"=== SECCIÓN 1: PDFs DE CIERRE DE CAJA ({len(pdfs)} archivos) ==="
+        })
+        for f in pdfs:
+            blocks.append({
+                "type": "text",
+                "text": f"--- Archivo: {f['name']} ---",
+            })
+            blocks.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": _to_base64(f["data"]),
+                },
+            })
+
+    # Section 2: NEONET / Credomatic photos
+    if neonet:
+        blocks.append({
+            "type": "text",
+            "text": f"\n=== SECCIÓN 2: FOTOS NEONET / CREDOMATIC ({len(neonet)} fotos) ==="
+        })
+        for f in neonet:
+            blocks.append({
+                "type": "text",
+                "text": f"--- Foto: {f['name']} ---",
+            })
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": f["mime"] if f["mime"] in (
+                        "image/jpeg", "image/png", "image/gif", "image/webp"
+                    ) else "image/jpeg",
+                    "data": _to_base64(f["data"]),
+                },
+            })
+
+    # Section 3: Bank slips
+    if boletas:
+        blocks.append({
+            "type": "text",
+            "text": f"\n=== SECCIÓN 3: BOLETAS DE BANCO ({len(boletas)} fotos) ==="
+        })
+        for f in boletas:
+            blocks.append({
+                "type": "text",
+                "text": f"--- Boleta: {f['name']} ---",
+            })
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": f["mime"] if f["mime"] in (
+                        "image/jpeg", "image/png", "image/gif", "image/webp"
+                    ) else "image/jpeg",
+                    "data": _to_base64(f["data"]),
+                },
+            })
+
+    blocks.append({
+        "type": "text",
+        "text": "\n\nPor favor, analiza todos los documentos anteriores y devuelve "
+                "el JSON estructurado de conciliación tal como se especificó. "
+                "Solo el JSON, sin texto adicional, sin markdown."
+    })
+    return blocks
+
+
+def _call_claude(pdfs: list, neonet: list, boletas: list) -> dict:
+    """Call Claude Opus 4.7 with all uploaded files. Returns parsed JSON."""
+    import anthropic
+
+    api_key = st.secrets["anthropic"]["api_key"]
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content = _build_anthropic_content(pdfs, neonet, boletas)
+
+    response = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=8000,
+        system=ANALYSIS_PROMPT,
+        messages=[{"role": "user", "content": content}],
+    )
+
+    # Extract the text response
+    text = ""
+    for block in response.content:
+        if block.type == "text":
+            text += block.text
+
+    # Try to extract JSON if wrapped in markdown
+    text = text.strip()
+    if text.startswith("```"):
+        # strip ```json ... ```
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Claude devolvió un JSON inválido. Detalle: {e}\n\n"
+            f"Respuesta cruda (primeros 500 chars): {text[:500]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Render report
+# ---------------------------------------------------------------------------
+
+def _fmt_q(amount) -> str:
+    """Format as Q 1,234.50"""
+    try:
+        n = float(amount)
+    except (ValueError, TypeError):
+        return "Q 0.00"
+    return f"Q {n:,.2f}"
+
+
+def _render_report(report: dict):
+    """Render the analysis result as HTML cards + tables."""
+    report_date = report.get("report_date", "")
+    status = report.get("overall_status", "ok").lower()
+    summary = report.get("overall_summary", "")
+
+    # Header
+    try:
+        d = dt.date.fromisoformat(report_date)
+        date_display = d.strftime("%A %d de %B, %Y").capitalize()
+    except Exception:
+        date_display = report_date
+
+    st.markdown(
+        f'<div class="cc-report">'
+        f'<div class="cc-report-header">'
+        f'<div class="cc-report-eyebrow">Reporte de conciliación</div>'
+        f'<div class="cc-report-title">Cierre de Caja</div>'
+        f'<div class="cc-report-date">{date_display}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Overall status banner
+    status_class = {"ok": "green", "warning": "yellow", "error": "red"}.get(status, "yellow")
+    status_label = {
+        "green": "✓ Todo cuadra correctamente",
+        "yellow": "⚠ Atención: hay discrepancias",
+        "red": "🔴 Inconsistencias serias detectadas",
+    }[status_class]
+    st.markdown(
+        f'<div class="cc-overall {status_class}">'
+        f'<div class="cc-overall-title">{status_label}</div>'
+        f'<div class="cc-overall-body">{summary}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Totals
+    totals = report.get("totals_from_pdfs", {})
+    if totals:
+        st.markdown('<div class="cc-section-label">Totales del día (según PDFs)</div>',
+                    unsafe_allow_html=True)
+        st.markdown(
+            '<table class="cc-table">'
+            '<thead><tr><th>Forma de pago</th><th style="text-align:right;">Monto</th></tr></thead>'
+            '<tbody>'
+            f'<tr><td>Tarjeta CREDOMATIC</td><td class="amount">{_fmt_q(totals.get("credomatic", 0))}</td></tr>'
+            f'<tr><td>Tarjeta VISANET / NEONET</td><td class="amount">{_fmt_q(totals.get("visanet", 0))}</td></tr>'
+            f'<tr><td>Efectivo</td><td class="amount">{_fmt_q(totals.get("efectivo", 0))}</td></tr>'
+            f'<tr><td>Depósitos bancarios realizados</td><td class="amount">{_fmt_q(totals.get("depositos_bancarios", 0))}</td></tr>'
+            f'<tr class="total"><td>TOTAL VENTAS</td><td class="amount">{_fmt_q(totals.get("total_ventas", 0))}</td></tr>'
+            '</tbody></table>',
+            unsafe_allow_html=True,
+        )
+
+    # Cashier breakdown
+    breakdown = report.get("cashier_breakdown", [])
+    if breakdown:
+        st.markdown('<div class="cc-section-label">Detalle por cajero</div>',
+                    unsafe_allow_html=True)
+        rows = []
+        for c in breakdown:
+            diff_html = ""
+            if c.get("diferencia_interna", 0):
+                diff_html = (
+                    f'<div style="color:#B91C1C;font-size:10px;margin-top:2px;">'
+                    f'⚠ Diferencia interna: {_fmt_q(c["diferencia_interna"])}</div>'
+                )
+            note_html = ""
+            if c.get("notes"):
+                note_html = (
+                    f'<div style="color:#6C7280;font-size:10px;margin-top:2px;">'
+                    f'{c["notes"]}</div>'
+                )
+            rows.append(
+                f'<tr>'
+                f'<td><strong>{c.get("store", "?")}</strong><br>'
+                f'<span style="font-size:10px;color:#6C7280;">{c.get("pos_ref", "")}</span></td>'
+                f'<td>{c.get("cashier", "?")}'
+                f'{diff_html}{note_html}</td>'
+                f'<td class="amount">{_fmt_q(c.get("credomatic", 0))}</td>'
+                f'<td class="amount">{_fmt_q(c.get("visanet", 0))}</td>'
+                f'<td class="amount">{_fmt_q(c.get("efectivo", 0))}</td>'
+                f'<td class="amount">{_fmt_q(c.get("deposito", 0))}</td>'
+                f'</tr>'
+            )
+        st.markdown(
+            '<table class="cc-table">'
+            '<thead><tr>'
+            '<th>Tienda</th><th>Cajero</th>'
+            '<th style="text-align:right;">Credomatic</th>'
+            '<th style="text-align:right;">Visanet</th>'
+            '<th style="text-align:right;">Efectivo</th>'
+            '<th style="text-align:right;">Depósito</th>'
+            '</tr></thead><tbody>'
+            + "".join(rows) +
+            '</tbody></table>',
+            unsafe_allow_html=True,
+        )
+
+    # Card reconciliation
+    card_rec = report.get("card_reconciliation", {})
+    if card_rec:
+        st.markdown('<div class="cc-section-label">Conciliación de tarjetas</div>',
+                    unsafe_allow_html=True)
+        for key, label in [("credomatic", "CREDOMATIC"), ("visanet_neonet", "VISANET / NEONET")]:
+            r = card_rec.get(key, {})
+            if not r:
+                continue
+            r_status = r.get("status", "ok").lower()
+            r_class = {"ok": "ok", "warning": "warn", "error": "alert"}.get(r_status, "warn")
+            diff = r.get("difference", 0)
             st.markdown(
-                '<div class="cc-dup-warning">'
-                '<div class="cc-dup-title">⚠ Detectamos archivos duplicados</div>'
-                '<div class="cc-dup-body">'
-                'Varios PDFs corresponden al mismo cierre. Elige qué hacer con ellos antes de subir.'
-                '</div></div>',
+                f'<div class="cc-finding {r_class}">'
+                f'<div class="cc-finding-title">{label} — '
+                f'POS: {_fmt_q(r.get("pos_total", 0))} vs. '
+                f'Ticket: {_fmt_q(r.get("ticket_total", 0))} '
+                f'(diferencia: {_fmt_q(diff)})</div>'
+                f'<div class="cc-finding-body">{r.get("note", "")}</div>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
 
-            # Build a map: upload object -> 'keep'/'skip'
-            decisions = {}
-            for ref, items in duplicates.items():
-                st.markdown(f"**Cierre duplicado: `{ref}`** ({len(items)} archivos)")
-                # Sort items: prefer the one with latest filename timestamp
-                items_sorted = sorted(items, key=lambda x: x[0].name, reverse=True)
-                names = [u.name for u, _ in items_sorted]
-                choice = st.radio(
-                    f"Para `{ref}`, ¿qué archivo conservar?",
-                    options=names + ["⚠ Cancelar — no subir ninguno de este cierre"],
-                    index=0,
-                    key=f"dup_choice_{ref}",
+    # Bank reconciliation
+    bank_rec = report.get("bank_reconciliation", {})
+    if bank_rec:
+        st.markdown('<div class="cc-section-label">Conciliación bancaria (efectivo)</div>',
+                    unsafe_allow_html=True)
+        pos_total = bank_rec.get("pos_deposits_total", 0)
+        slips_total = bank_rec.get("bank_slips_total", 0)
+        diff = bank_rec.get("difference", 0)
+        st.markdown(
+            f'<table class="cc-table">'
+            f'<tr><td>Depósitos según PDFs</td><td class="amount">{_fmt_q(pos_total)}</td></tr>'
+            f'<tr><td>Suma de boletas de banco subidas</td><td class="amount">{_fmt_q(slips_total)}</td></tr>'
+            f'<tr class="total"><td>Diferencia</td><td class="amount">{_fmt_q(diff)}</td></tr>'
+            f'</table>',
+            unsafe_allow_html=True,
+        )
+
+        matched = bank_rec.get("matched", [])
+        if matched:
+            st.markdown('<div style="font-size:11px;font-weight:700;color:#15803D;'
+                        'margin:14px 0 6px;text-transform:uppercase;letter-spacing:1.5px;">'
+                        f'✓ {len(matched)} depósito(s) que cuadran</div>',
+                        unsafe_allow_html=True)
+            for m in matched:
+                st.markdown(
+                    f'<div class="cc-finding ok">'
+                    f'<div class="cc-finding-title">'
+                    f'{m.get("pos_ref","")} · {_fmt_q(m.get("pos_amount", 0))}'
+                    f'</div>'
+                    f'<div class="cc-finding-body">'
+                    f'Boleta #{m.get("slip_number","")} · {_fmt_q(m.get("slip_amount", 0))}'
+                    f'</div></div>',
+                    unsafe_allow_html=True,
                 )
-                for u, _ in items_sorted:
-                    decisions[u.name] = (
-                        "keep" if u.name == choice else "skip"
-                    )
 
-            # Files without duplicates → auto-keep
-            all_dup_names = {u.name for items in duplicates.values() for u, _ in items}
-            for up in uploaded:
-                if up.name not in all_dup_names:
-                    decisions[up.name] = "keep"
+        missing = bank_rec.get("missing_slips", [])
+        if missing:
+            st.markdown('<div style="font-size:11px;font-weight:700;color:#B45309;'
+                        'margin:14px 0 6px;text-transform:uppercase;letter-spacing:1.5px;">'
+                        f'⚠ {len(missing)} depósito(s) sin boleta de banco</div>',
+                        unsafe_allow_html=True)
+            for m in missing:
+                st.markdown(
+                    f'<div class="cc-finding warn">'
+                    f'<div class="cc-finding-title">'
+                    f'Falta boleta: {m.get("pos_ref","")} · {_fmt_q(m.get("amount", 0))}'
+                    f'</div>'
+                    f'<div class="cc-finding-body">Cajero: {m.get("cashier", "?")}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
-            keep_count = sum(1 for v in decisions.values() if v == "keep")
-            st.info(f"Se subirán **{keep_count} de {len(uploaded)}** archivos.")
+        orphans = bank_rec.get("orphan_slips", [])
+        if orphans:
+            st.markdown('<div style="font-size:11px;font-weight:700;color:#B91C1C;'
+                        'margin:14px 0 6px;text-transform:uppercase;letter-spacing:1.5px;">'
+                        f'🔴 {len(orphans)} boleta(s) sin PDF correspondiente</div>',
+                        unsafe_allow_html=True)
+            for o in orphans:
+                st.markdown(
+                    f'<div class="cc-finding alert">'
+                    f'<div class="cc-finding-title">'
+                    f'Boleta huérfana #{o.get("slip_number","")} · {_fmt_q(o.get("amount", 0))}'
+                    f'</div>'
+                    f'<div class="cc-finding-body">Fecha: {o.get("date", "?")}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
-        else:
-            decisions = {up.name: "keep" for up in uploaded}
-
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("⬆ Subir a Drive", use_container_width=True,
-                         type="primary", key="upload_pdfs_btn"):
-                try:
-                    n = 0
-                    detected_dates = set()
-                    for up in uploaded:
-                        if decisions.get(up.name) != "keep":
-                            continue
-                        up.seek(0)
-                        data = up.read()
-                        # Try to detect the date inside the PDF to warn if it doesn't match
-                        pdf_date = _extract_pos_date(data)
-                        if pdf_date:
-                            detected_dates.add(pdf_date)
-                        drive_storage.upload_file(
-                            folder_ids["pdfs"], up.name, data, "application/pdf",
-                        )
-                        n += 1
-                    st.success(f"✓ {n} PDFs subidos a Google Drive")
-                    if len(detected_dates) > 1:
-                        st.warning(
-                            f"⚠ Los PDFs subidos contienen **fechas diferentes**: "
-                            f"{', '.join(d.isoformat() for d in sorted(detected_dates))}. "
-                            f"Verifica que correspondan al día que seleccionaste."
-                        )
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error al subir: `{e}`")
-        with col1:
-            st.caption(
-                "Cada PDF se identifica por su número de cierre (POS/AAAA/MM/DD/NNNN). "
-                "Si subes dos PDFs con el mismo número, te avisaremos."
+    # General findings
+    findings = report.get("findings", [])
+    if findings:
+        st.markdown('<div class="cc-section-label">Hallazgos generales</div>',
+                    unsafe_allow_html=True)
+        for f in findings:
+            sev = f.get("severity", "warn").lower()
+            sev_class = {"ok": "ok", "warn": "warn", "alert": "alert"}.get(sev, "warn")
+            icon = {"ok": "✓", "warn": "⚠", "alert": "🔴"}.get(sev, "•")
+            st.markdown(
+                f'<div class="cc-finding {sev_class}">'
+                f'<div class="cc-finding-title">{icon} {f.get("title", "")}</div>'
+                f'<div class="cc-finding-body">{f.get("detail", "")}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
             )
 
-    # Existing files
-    st.markdown(
-        '<div style="margin-top:18px;font-size:11px;letter-spacing:2px;'
-        'text-transform:uppercase;color:#6C7280;font-weight:600;">'
-        'Archivos ya subidos</div>',
-        unsafe_allow_html=True,
-    )
-    _render_existing_files(folder_ids["pdfs"])
-
-
-def _render_section_2_neonet(folder_ids: dict) -> None:
-    """Section 2: NEONET/Credomatic photos."""
-    st.markdown(
-        '<div class="cc-section-head">'
-        '<div class="cc-section-number">2</div>'
-        '<div><div class="cc-section-title">Foto NEONET / Credomatic</div>'
-        '<div class="cc-section-desc">Tickets resumen de transacciones de tarjeta del POS.</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    st.caption(
-        "📱 En el celular: el botón abre tu cámara o galería. "
-        "💻 En computadora: te deja seleccionar archivos del disco."
-    )
-
-    uploaded = st.file_uploader(
-        "Subir o tomar foto(s) de NEONET / Credomatic",
-        type=["jpg", "jpeg", "png", "heic", "heif"],
-        accept_multiple_files=True,
-        key="upload_neonet",
-        label_visibility="collapsed",
-    )
-    if uploaded:
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("⬆ Subir a Drive", use_container_width=True,
-                         type="primary", key="upload_neonet_btn"):
-                try:
-                    for up in uploaded:
-                        up.seek(0)
-                        data = up.read()
-                        mime = up.type or "image/jpeg"
-                        # If the file came from camera with a generic name, rename with timestamp
-                        name = up.name
-                        if name.lower() in ("image.jpg", "image.jpeg", "image.png", "photo.jpg"):
-                            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S")
-                            ext = name.rsplit(".", 1)[-1].lower()
-                            name = f"neonet_{ts}.{ext}"
-                        drive_storage.upload_file(
-                            folder_ids["neonet"], name, data, mime,
-                        )
-                    st.success(f"✓ {len(uploaded)} foto(s) subida(s)")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: `{e}`")
-        with col1:
-            st.caption(f"Listo para subir: **{len(uploaded)} archivo(s)**")
-
-    st.markdown(
-        '<div style="margin-top:18px;font-size:11px;letter-spacing:2px;'
-        'text-transform:uppercase;color:#6C7280;font-weight:600;">'
-        'Fotos ya subidas</div>',
-        unsafe_allow_html=True,
-    )
-    _render_existing_files(folder_ids["neonet"])
-
-
-def _render_section_3_boletas(folder_ids: dict) -> None:
-    """Section 3: Bank deposit slips."""
-    st.markdown(
-        '<div class="cc-section-head">'
-        '<div class="cc-section-number">3</div>'
-        '<div><div class="cc-section-title">Boletas de Banco / Depósitos</div>'
-        '<div class="cc-section-desc">Comprobantes físicos de los depósitos hechos al banco.</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    st.caption(
-        "📱 En el celular: el botón abre tu cámara o galería. "
-        "💻 En computadora: te deja seleccionar archivos del disco."
-    )
-
-    uploaded = st.file_uploader(
-        "Subir o tomar foto(s) de boletas de banco",
-        type=["jpg", "jpeg", "png", "heic", "heif"],
-        accept_multiple_files=True,
-        key="upload_boletas",
-        label_visibility="collapsed",
-    )
-    if uploaded:
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("⬆ Subir a Drive", use_container_width=True,
-                         type="primary", key="upload_boletas_btn"):
-                try:
-                    for up in uploaded:
-                        up.seek(0)
-                        data = up.read()
-                        mime = up.type or "image/jpeg"
-                        name = up.name
-                        if name.lower() in ("image.jpg", "image.jpeg", "image.png", "photo.jpg"):
-                            ts = dt.datetime.now(GT_TZ).strftime("%Y%m%d_%H%M%S")
-                            ext = name.rsplit(".", 1)[-1].lower()
-                            name = f"boleta_{ts}.{ext}"
-                        drive_storage.upload_file(
-                            folder_ids["boletas"], name, data, mime,
-                        )
-                    st.success(f"✓ {len(uploaded)} foto(s) subida(s)")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: `{e}`")
-        with col1:
-            st.caption(f"Listo para subir: **{len(uploaded)} archivo(s)**")
-
-    st.markdown(
-        '<div style="margin-top:18px;font-size:11px;letter-spacing:2px;'
-        'text-transform:uppercase;color:#6C7280;font-weight:600;">'
-        'Fotos ya subidas</div>',
-        unsafe_allow_html=True,
-    )
-    _render_existing_files(folder_ids["boletas"])
+    st.markdown('</div>', unsafe_allow_html=True)  # close .cc-report
 
 
 # ---------------------------------------------------------------------------
-# History view
+# PDF generation for download
 # ---------------------------------------------------------------------------
 
-def _render_history():
-    """Show list of previously processed dates."""
+def _build_report_pdf(report: dict, user_name: str) -> bytes:
+    """Generate a downloadable PDF of the report."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=LETTER,
+        leftMargin=0.7 * inch, rightMargin=0.7 * inch,
+        topMargin=0.7 * inch, bottomMargin=0.7 * inch,
+    )
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    title_style = ParagraphStyle(
+        "Title", parent=styles["Title"], fontSize=18, textColor=colors.HexColor("#0B0F19"),
+        spaceAfter=4, alignment=0,
+    )
+    sub_style = ParagraphStyle(
+        "Sub", parent=styles["Normal"], fontSize=9,
+        textColor=colors.HexColor("#6C7280"), spaceAfter=18,
+    )
+    h2_style = ParagraphStyle(
+        "H2", parent=styles["Heading2"], fontSize=11, textColor=colors.HexColor("#0B0F19"),
+        spaceBefore=14, spaceAfter=8, fontName="Helvetica-Bold",
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles["Normal"], fontSize=9.5, leading=13,
+        textColor=colors.HexColor("#3D4554"),
+    )
+
+    story = []
+
+    # Title
+    report_date = report.get("report_date", "")
     try:
-        dates = drive_storage.list_processed_dates()
-    except Exception as e:
-        st.warning(f"No se pudo cargar el historial: `{e}`")
-        return
+        d = dt.date.fromisoformat(report_date)
+        date_display = d.strftime("%A %d de %B de %Y").capitalize()
+    except Exception:
+        date_display = report_date
 
-    if not dates:
-        st.markdown(
-            '<div class="cc-empty">Aún no hay cierres procesados. '
-            'Sube archivos arriba para crear el primero.</div>',
-            unsafe_allow_html=True,
-        )
-        return
+    story.append(Paragraph("VINTAGE BOUTIQUE", sub_style))
+    story.append(Paragraph("Reporte de Conciliación de Cierres de Caja", title_style))
+    story.append(Paragraph(f"{date_display}", sub_style))
 
-    for date_str in dates[:20]:  # last 20
-        try:
-            d = dt.date.fromisoformat(date_str)
-            human = d.strftime("%A %d de %B, %Y").capitalize()
-        except Exception:
-            human = date_str
+    # Overall status
+    status = report.get("overall_status", "ok").lower()
+    status_color = {
+        "ok": colors.HexColor("#059669"),
+        "warning": colors.HexColor("#D97706"),
+        "error": colors.HexColor("#DC2626"),
+    }.get(status, colors.HexColor("#D97706"))
+    status_label = {
+        "ok": "TODO CUADRA CORRECTAMENTE",
+        "warning": "ATENCIÓN: HAY DISCREPANCIAS",
+        "error": "INCONSISTENCIAS SERIAS DETECTADAS",
+    }.get(status, "ATENCIÓN")
+    status_para = Paragraph(
+        f'<para><font color="{status_color.hexval()}"><b>{status_label}</b></font></para>',
+        body_style,
+    )
+    story.append(status_para)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(report.get("overall_summary", ""), body_style))
+    story.append(Spacer(1, 14))
 
-        col1, col2, col3 = st.columns([3, 2, 1])
-        col1.markdown(
-            f'<div style="padding:8px 0;font-weight:600;font-size:13px;'
-            f'font-family:Geist Mono,monospace;">{date_str}</div>'
-            f'<div style="font-size:11px;color:#6C7280;">{human}</div>',
-            unsafe_allow_html=True,
-        )
-        col2.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
-        col2.caption("Análisis disponible próximamente (Fase 2)")
-        if col3.button("Ver", key=f"hist_{date_str}", use_container_width=True):
-            try:
-                st.session_state.cc_date = dt.date.fromisoformat(date_str)
-                st.rerun()
-            except Exception:
-                pass
+    # Totals
+    totals = report.get("totals_from_pdfs", {})
+    if totals:
+        story.append(Paragraph("Totales del día (según PDFs)", h2_style))
+        data = [
+            ["Forma de pago", "Monto"],
+            ["Tarjeta CREDOMATIC", _fmt_q(totals.get("credomatic", 0))],
+            ["Tarjeta VISANET / NEONET", _fmt_q(totals.get("visanet", 0))],
+            ["Efectivo", _fmt_q(totals.get("efectivo", 0))],
+            ["Depósitos bancarios", _fmt_q(totals.get("depositos_bancarios", 0))],
+            ["TOTAL VENTAS", _fmt_q(totals.get("total_ventas", 0))],
+        ]
+        t = Table(data, colWidths=[3.5 * inch, 2.5 * inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F6F7F9")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0B0F19")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E8EBF0")),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FAFBFC")),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ]))
+        story.append(t)
+
+    # Cashier breakdown
+    breakdown = report.get("cashier_breakdown", [])
+    if breakdown:
+        story.append(Paragraph("Detalle por cajero", h2_style))
+        data = [["Tienda / Cajero", "Cierre POS", "Credomatic", "Visanet", "Efectivo", "Depósito"]]
+        for c in breakdown:
+            data.append([
+                Paragraph(
+                    f'<b>{c.get("store","?")}</b><br/>'
+                    f'<font size="8" color="#6C7280">{c.get("cashier","?")}</font>',
+                    body_style,
+                ),
+                c.get("pos_ref", ""),
+                _fmt_q(c.get("credomatic", 0)),
+                _fmt_q(c.get("visanet", 0)),
+                _fmt_q(c.get("efectivo", 0)),
+                _fmt_q(c.get("deposito", 0)),
+            ])
+        t = Table(data, colWidths=[1.5*inch, 1.4*inch, 0.85*inch, 0.85*inch, 0.85*inch, 0.85*inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F6F7F9")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E8EBF0")),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(t)
+
+    # Card reconciliation
+    card_rec = report.get("card_reconciliation", {})
+    if card_rec:
+        story.append(Paragraph("Conciliación de tarjetas", h2_style))
+        for key, label in [("credomatic", "CREDOMATIC"), ("visanet_neonet", "VISANET / NEONET")]:
+            r = card_rec.get(key, {})
+            if not r:
+                continue
+            line = (
+                f"<b>{label}</b> — POS: {_fmt_q(r.get('pos_total', 0))} · "
+                f"Ticket: {_fmt_q(r.get('ticket_total', 0))} · "
+                f"Diferencia: <b>{_fmt_q(r.get('difference', 0))}</b>"
+            )
+            if r.get("note"):
+                line += f"<br/><font size='8' color='#6C7280'>{r['note']}</font>"
+            story.append(Paragraph(line, body_style))
+            story.append(Spacer(1, 6))
+
+    # Bank reconciliation
+    bank_rec = report.get("bank_reconciliation", {})
+    if bank_rec:
+        story.append(Paragraph("Conciliación bancaria", h2_style))
+        story.append(Paragraph(
+            f"Depósitos según PDFs: <b>{_fmt_q(bank_rec.get('pos_deposits_total', 0))}</b> · "
+            f"Boletas: <b>{_fmt_q(bank_rec.get('bank_slips_total', 0))}</b> · "
+            f"Diferencia: <b>{_fmt_q(bank_rec.get('difference', 0))}</b>",
+            body_style,
+        ))
+
+        missing = bank_rec.get("missing_slips", [])
+        if missing:
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(
+                f"<b><font color='#B45309'>Depósitos sin boleta ({len(missing)}):</font></b>",
+                body_style,
+            ))
+            for m in missing:
+                story.append(Paragraph(
+                    f"• {m.get('pos_ref','')} — {_fmt_q(m.get('amount', 0))} "
+                    f"({m.get('cashier','?')})",
+                    body_style,
+                ))
+
+        orphans = bank_rec.get("orphan_slips", [])
+        if orphans:
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(
+                f"<b><font color='#B91C1C'>Boletas huérfanas ({len(orphans)}):</font></b>",
+                body_style,
+            ))
+            for o in orphans:
+                story.append(Paragraph(
+                    f"• Boleta #{o.get('slip_number','')} — {_fmt_q(o.get('amount', 0))} "
+                    f"({o.get('date','?')})",
+                    body_style,
+                ))
+
+    # Findings
+    findings = report.get("findings", [])
+    if findings:
+        story.append(Paragraph("Hallazgos", h2_style))
+        for f in findings:
+            sev = f.get("severity", "warn").lower()
+            sev_color = {
+                "ok": "#15803D",
+                "warn": "#B45309",
+                "alert": "#B91C1C",
+            }.get(sev, "#B45309")
+            icon = {"ok": "✓", "warn": "⚠", "alert": "•"}.get(sev, "•")
+            story.append(Paragraph(
+                f"<font color='{sev_color}'><b>{icon} {f.get('title','')}</b></font>",
+                body_style,
+            ))
+            story.append(Paragraph(f.get("detail", ""), body_style))
+            story.append(Spacer(1, 6))
+
+    # Footer
+    story.append(Spacer(1, 24))
+    story.append(Paragraph(
+        f'<font size="7" color="#9CA3AF">Reporte generado por '
+        f'{user_name} · {dt.datetime.now(GT_TZ).strftime("%d/%m/%Y %H:%M GT")} · '
+        f'Vintage Boutique — Sistema de Asistencia y Reportes</font>',
+        body_style,
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -543,94 +1171,144 @@ def render(current_user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # Verify Drive config exists
-    try:
-        _ = st.secrets["drive"]["root_folder_id"]
-    except Exception:
-        st.error(
-            "⚠ **Falta configurar Google Drive.**\n\n"
-            "Pablo debe seguir estos pasos:\n"
-            "1. Crear una carpeta en Google Drive (ej. 'Vintage Boutique - Reportes')\n"
-            "2. Compartirla con la cuenta de servicio "
-            "`vintage-boutique-bot@asistencia-y-reportes.iam.gserviceaccount.com` "
-            "como **Editor**\n"
-            "3. Copiar el ID de la carpeta de la URL "
-            "(`drive.google.com/drive/folders/AQUI_VA_EL_ID`)\n"
-            "4. Agregar al final del archivo Secrets en Streamlit Cloud:\n"
-            "```toml\n[drive]\nroot_folder_id = \"AQUI_VA_EL_ID\"\n```"
+    # Date picker + clear-all button
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        report_date = st.date_input(
+            "📅 Fecha del cierre que estás conciliando",
+            value=st.session_state.get("cc_report_date", _today_gt()),
+            format="DD/MM/YYYY",
         )
-        return
+        st.session_state.cc_report_date = report_date
 
-    # Tab nav
-    tab_subir, tab_historial = st.tabs(["📥 Subir archivos del día", "📚 Historial"])
+    with col2:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        n_total = len(_bucket("cc_pdfs")) + len(_bucket("cc_neonet")) + len(_bucket("cc_boletas"))
+        st.caption(f"📂 Archivos cargados: **{n_total}**")
 
-    with tab_subir:
-        # Date picker
-        col1, col2, col3 = st.columns([2, 2, 1])
-        with col1:
-            selected_date = st.date_input(
-                "📅 Fecha del cierre",
-                value=st.session_state.get("cc_date", _today_gt()),
-                format="DD/MM/YYYY",
-                key="cc_date_picker",
+    with col3:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("🗑 Limpiar todo", use_container_width=True):
+            _clear_bucket("cc_pdfs")
+            _clear_bucket("cc_neonet")
+            _clear_bucket("cc_boletas")
+            st.session_state.pop("cc_last_report", None)
+            st.rerun()
+
+    st.markdown("---")
+
+    # 3 sections
+    st.markdown('<div class="cc-section">', unsafe_allow_html=True)
+    _render_section_pdfs()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="cc-section">', unsafe_allow_html=True)
+    _render_section_photos(
+        "cc_neonet", 2, "Foto NEONET / Credomatic",
+        "Tickets resumen de transacciones de tarjeta del POS.",
+        "neonet",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="cc-section">', unsafe_allow_html=True)
+    _render_section_photos(
+        "cc_boletas", 3, "Boletas de Banco / Depósitos",
+        "Comprobantes físicos de los depósitos hechos al banco.",
+        "boleta",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ========== Analyze button ==========
+    pdfs = _bucket("cc_pdfs")
+    neonet = _bucket("cc_neonet")
+    boletas = _bucket("cc_boletas")
+
+    if not pdfs:
+        st.info(
+            "📤 **Para empezar:** Sube al menos un PDF de cierre de caja en la Sección 1. "
+            "Las fotos de NEONET y boletas de banco son opcionales — pero entre más subas, "
+            "más completa será la conciliación."
+        )
+    else:
+        # CTA
+        st.markdown(
+            f'<div class="cc-analyze-cta">'
+            f'<h3>Listo para analizar y conciliar</h3>'
+            f'<p>Tenemos <span class="cta-gold">{len(pdfs)} PDF(s)</span> · '
+            f'<span class="cta-gold">{len(neonet)} foto(s) NEONET</span> · '
+            f'<span class="cta-gold">{len(boletas)} boleta(s)</span>. '
+            f'La IA cruzará los datos y te dirá si todo cuadra.</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            analyze = st.button(
+                "🔬 Analizar y Conciliar con IA",
+                use_container_width=True,
+                type="primary",
             )
-            st.session_state.cc_date = selected_date
+
+        if analyze:
+            # Check API key configured
+            try:
+                _ = st.secrets["anthropic"]["api_key"]
+            except Exception:
+                st.error(
+                    "⚠ Falta configurar la API key de Anthropic en los secrets de Streamlit. "
+                    "Agrega:\n```toml\n[anthropic]\napi_key = \"sk-ant-...\"\n```"
+                )
+                return
+
+            with st.spinner(
+                "🔬 Claude está leyendo todos los documentos y haciendo la conciliación... "
+                "Esto puede tardar 30–60 segundos."
+            ):
+                try:
+                    report = _call_claude(pdfs, neonet, boletas)
+                    st.session_state.cc_last_report = report
+                    st.success("✓ Análisis completo")
+                except Exception as e:
+                    st.error(f"Error durante el análisis: `{e}`")
+                    return
+
+    # Show last report if it exists
+    if st.session_state.get("cc_last_report"):
+        report = st.session_state["cc_last_report"]
+        _render_report(report)
+
+        # Download buttons
+        st.markdown("---")
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            try:
+                pdf_bytes = _build_report_pdf(report, current_user["name"])
+                report_date_str = report.get("report_date", _today_gt().isoformat())
+                filename = f"Conciliacion_Cierre_{report_date_str}.pdf"
+                st.download_button(
+                    "📥 Descargar PDF del reporte",
+                    data=pdf_bytes,
+                    file_name=filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary",
+                )
+            except Exception as e:
+                st.error(f"Error generando PDF: `{e}`")
 
         with col2:
-            today = _today_gt()
-            helper = ""
-            if selected_date == today:
-                helper = "Hoy"
-            elif selected_date == today - dt.timedelta(days=1):
-                helper = "Ayer"
-            elif selected_date == today - dt.timedelta(days=3):
-                helper = "Viernes pasado (cierre del fin de semana)"
-            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-            if helper:
-                st.caption(f"📌 {helper}")
-
-        with col3:
-            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-            if st.button("↻ Recargar", use_container_width=True):
-                st.rerun()
-
-        # Ensure folders exist for this date
-        try:
-            folder_ids = drive_storage.ensure_day_structure(selected_date)
-        except Exception as e:
-            st.error(
-                f"No se pudo acceder a Google Drive: `{e}`\n\n"
-                "Verifica que la cuenta de servicio tenga acceso a la carpeta raíz."
+            json_bytes = json.dumps(report, indent=2, ensure_ascii=False).encode("utf-8")
+            st.download_button(
+                "📄 Descargar datos crudos (JSON)",
+                data=json_bytes,
+                file_name=f"reporte_{report.get('report_date', 'sin-fecha')}.json",
+                mime="application/json",
+                use_container_width=True,
             )
-            return
 
-        st.markdown("---")
-
-        # 3 sections
-        st.markdown('<div class="cc-section">', unsafe_allow_html=True)
-        _render_section_1_pdfs(folder_ids)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="cc-section">', unsafe_allow_html=True)
-        _render_section_2_neonet(folder_ids)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="cc-section">', unsafe_allow_html=True)
-        _render_section_3_boletas(folder_ids)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # Future analyze button
-        st.markdown("---")
-        st.info(
-            "🔬 **Próximamente (Fase 2):** Botón para analizar y conciliar "
-            "automáticamente los PDFs con las fotos NEONET y boletas, usando "
-            "inteligencia artificial."
-        )
-
-    with tab_historial:
-        st.markdown("##### Cierres procesados anteriormente")
         st.caption(
-            "Selecciona una fecha para ver los archivos subidos en ese cierre."
+            "💡 El PDF lo puedes guardar manualmente en tu Google Drive arrastrándolo "
+            "después de descargarlo, o reenviarlo por email/WhatsApp."
         )
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        _render_history()
