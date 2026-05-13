@@ -1,4 +1,4 @@
-[Uploading README.md…]()
+[README.md](https://github.com/user-attachments/files/27730202/README.md)
 # Vintage Boutique — Sistema de Asistencia
 
 Dashboard ejecutivo de asistencia para las dos tiendas de Vintage Boutique en
