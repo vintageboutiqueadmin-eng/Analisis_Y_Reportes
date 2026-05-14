@@ -114,6 +114,10 @@ def get_attendance_for_date(date_iso: str) -> list[dict]:
             "actual_start": str(r.get("actual_start", "")).strip() or None,
             "notes": str(r.get("notes", "")).strip(),
             "worked_store_id": str(r.get("worked_store_id", "")).strip() or None,
+            "shift_split": _to_bool(r.get("shift_split")),
+            "segment2_store_id": str(r.get("segment2_store_id", "")).strip() or None,
+            "segment2_start": str(r.get("segment2_start", "")).strip() or None,
+            "segment2_end": str(r.get("segment2_end", "")).strip() or None,
         })
     return out
 
@@ -141,6 +145,7 @@ ATTENDANCE_HEADERS = [
     "lunch_start", "lunch_end", "overtime_minutes", "is_late",
     "actual_start", "notes", "updated_by", "updated_at",
     "worked_store_id",
+    "shift_split", "segment2_store_id", "segment2_start", "segment2_end",
 ]
 
 
@@ -190,6 +195,10 @@ def upsert_attendance(record: dict, updated_by: str) -> None:
         updated_by,
         now_iso,
         record.get("worked_store_id") or "",
+        "true" if record.get("shift_split") else "false",
+        record.get("segment2_store_id") or "",
+        record.get("segment2_start") or "",
+        record.get("segment2_end") or "",
     ]
 
     if target_row:
