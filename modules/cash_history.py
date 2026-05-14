@@ -488,3 +488,139 @@ def apply_resolutions_to_origin_reports(resolved_items: list[dict]) -> int:
             updated_count += 1
 
     return updated_count
+
+
+# ===========================================================================
+# INLINE RESOLUTION from Pending tray (subir boleta/PDF para resolver)
+# ===========================================================================
+
+def find_pending_combinations(target_amount: float, pendings: list[dict],
+                               tolerance: float = 1.0, max_size: int = 3) -> list[list[dict]]:
+    """
+    Find combinations of pending entries (size 1 to max_size) whose sum matches
+    target_amount within tolerance.
+    Returns list of combinations, each combination being a list of pending dicts.
+    Sorted by combination size (smaller first), then by closeness to target.
+    """
+    from itertools import combinations
+
+    results = []
+    for size in range(1, max_size + 1):
+        for combo in combinations(pendings, size):
+            total = sum(p["amount"] for p in combo)
+            if abs(total - target_amount) <= tolerance:
+                results.append({
+                    "combo": list(combo),
+                    "total": total,
+                    "size": size,
+                    "delta": abs(total - target_amount),
+                })
+
+    # Sort: prefer smaller combinations, then exactness
+    results.sort(key=lambda x: (x["size"], x["delta"]))
+    return [r["combo"] for r in results]
+
+
+def resolve_pending_inline(pending_ids: list[str], resolver_report_id: str,
+                            slip_or_pdf_id: str, amount: float,
+                            note: str = "") -> dict:
+    """
+    Mark a list of pendings as resolved by an inline upload action.
+    Updates origin reports to reflect resolution.
+
+    Args:
+        pending_ids: list of pending IDs being resolved (1 or more if combined)
+        resolver_report_id: synthetic ID for this inline resolution event
+        slip_or_pdf_id: the slip number (J No.) or POS ref of the new doc
+        amount: amount of the uploaded doc
+        note: optional human note
+
+    Returns: {"resolved": N, "origin_reports_updated": M}
+    """
+    resolved_items = []
+    for pid in pending_ids:
+        # Look up pending details before marking resolved
+        full = list_pending(only_open=False)
+        pending = next((p for p in full if p["id"] == pid), None)
+        if not pending:
+            continue
+        if mark_pending_resolved(pid, resolver_report_id):
+            resolved_items.append({
+                "pending_id": pid,
+                "pending_type": pending["type"],
+                "original_report_id": pending["origin_report_id"],
+                "amount": pending["amount"],
+                "matched_with": slip_or_pdf_id,
+                "note": note,
+            })
+
+    origin_count = apply_resolutions_to_origin_reports(resolved_items)
+
+    return {
+        "resolved": len(resolved_items),
+        "origin_reports_updated": origin_count,
+    }
+
+
+def create_partial_remainder_pending(original_pending: dict, remainder_amount: float,
+                                       note: str = "") -> str:
+    """
+    When a pending gets PARTIALLY resolved (e.g. pending was Q1,697 and the new
+    boleta is only Q1,500), we mark the original as resolved and create a new
+    pending for the remainder (Q197).
+    """
+    details = dict(original_pending.get("details", {}))
+    details["note"] = (
+        f"Resto pendiente tras pago parcial. Pendiente original: "
+        f"Q{original_pending['amount']:.2f}. {note}"
+    ).strip()
+    return add_pending(
+        pending_type=original_pending["type"],
+        amount=remainder_amount,
+        origin_report_id=original_pending["origin_report_id"],
+        origin_date=original_pending["origin_date"],
+        details=details,
+    )
+
+
+def slip_number_exists_in_history(slip_number: str) -> tuple[bool, str]:
+    """
+    Check if a J No. is already registered somewhere. Returns (exists, report_id_or_pending_id).
+    """
+    sn = (slip_number or "").strip()
+    if not sn:
+        return False, ""
+
+    # Check in cierres_historicos via catalog
+    try:
+        catalog = build_processed_catalog()
+        if sn in catalog.get("bank_slips", {}):
+            return True, catalog["bank_slips"][sn]
+    except Exception:
+        pass
+
+    # Check inline-resolved slips: stored as resolver_report_id in pending rows
+    try:
+        all_p = list_pending(only_open=False)
+        for p in all_p:
+            d = p.get("details", {}) or {}
+            if d.get("slip_number") == sn:
+                return True, p["id"]
+    except Exception:
+        pass
+
+    return False, ""
+
+
+def pos_ref_exists_in_history(pos_ref: str) -> tuple[bool, str]:
+    """Check if a POS ref is already registered."""
+    pr = (pos_ref or "").strip()
+    if not pr:
+        return False, ""
+    try:
+        catalog = build_processed_catalog()
+        if pr in catalog.get("pos_refs", {}):
+            return True, catalog["pos_refs"][pr]
+    except Exception:
+        pass
+    return False, ""
