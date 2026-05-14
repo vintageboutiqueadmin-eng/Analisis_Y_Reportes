@@ -98,20 +98,43 @@ def _build_data(date: dt.date) -> dict:
     now_min = _now_minutes_for(date)
     stats = _compute_stats(employees, records_by_emp, now_min)
 
-    stores_out = []
-    for store in stores:
-        store_emps = [e for e in employees if e["store_id"] == store["id"]]
-        rendered_emps = []
-        for emp in store_emps:
-            rec = records_by_emp.get(emp["id"])
-            if not rec:
-                rendered_emps.append({
-                    "name": emp["name"],
-                    "status": "day_off",
-                    "notes": "Sin asignación para esta fecha",
-                })
-                continue
-            rendered_emps.append({
+    # Look up: employee_id -> employee dict (with default store_id)
+    emp_by_id = {e["id"]: e for e in employees}
+
+    # Decide where each employee BELONGS in the dashboard for this date.
+    # Priority:
+    #   1. If they have a record with worked_store_id → show at that store
+    #   2. Else if they have a record but no worked_store_id (legacy data) → show at their default store
+    #   3. Else (no record at all) → show at their default store as "Sin asignación"
+    store_employees_map = {s["id"]: [] for s in stores}
+
+    for emp in employees:
+        rec = records_by_emp.get(emp["id"])
+        if rec:
+            worked = (rec.get("worked_store_id") or "").strip()
+            target_store = worked if worked in store_employees_map else emp["store_id"]
+        else:
+            target_store = emp["store_id"]
+
+        if target_store not in store_employees_map:
+            # Edge case: emp's default store no longer exists
+            continue
+
+        is_support = (
+            rec is not None
+            and rec.get("status") == "working"
+            and target_store != emp["store_id"]
+        )
+
+        if not rec:
+            store_employees_map[target_store].append({
+                "name": emp["name"],
+                "status": "day_off",
+                "notes": "Sin asignación para esta fecha",
+                "is_support": False,
+            })
+        else:
+            store_employees_map[target_store].append({
                 "name": emp["name"],
                 "status": rec.get("status", "working"),
                 "shift_start": rec.get("shift_start"),
@@ -122,16 +145,20 @@ def _build_data(date: dt.date) -> dict:
                 "is_late": rec.get("is_late", False),
                 "actual_start": rec.get("actual_start"),
                 "notes": rec.get("notes", ""),
+                "is_support": is_support,
             })
 
-        rendered_emps.sort(
+    stores_out = []
+    for store in stores:
+        emps_here = store_employees_map.get(store["id"], [])
+        # Sort: working first, then by name
+        emps_here.sort(
             key=lambda e: (0 if e.get("status") == "working" else 1, e["name"])
         )
-
         stores_out.append({
             "title": store["name"],
             "marker": store.get("marker", ""),
-            "employees": rendered_emps,
+            "employees": emps_here,
         })
 
     return {
