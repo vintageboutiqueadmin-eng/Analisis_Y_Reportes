@@ -672,6 +672,351 @@ def _render_vip_tab(history: list[dict]):
 # Tab 4: Pendientes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Tab 4: Pendientes — inline resolution flow
+# ---------------------------------------------------------------------------
+
+def _render_pending_row(p: dict, current_user: dict, row_type: str,
+                         all_open_same_type: list[dict]) -> None:
+    """
+    Render a single pending row with an "Adjuntar" expander that lets the user
+    upload the missing document inline and resolve the pending(s).
+    """
+    d = p.get("details", {})
+
+    # Header line
+    col_main, col_action = st.columns([5, 1])
+    with col_main:
+        if row_type == "boleta_huerfana":
+            primary = f"J No. {d.get('slip_number', '?')}"
+            secondary = f"Boleta del {d.get('date', '?')}"
+        else:
+            primary = d.get("pos_ref", "?")
+            secondary = d.get("cashier", "?")
+        st.markdown(
+            f'<div class="ce-history-row">'
+            f'<div class="ce-history-status-dot warning"></div>'
+            f'<div class="ce-history-date">{primary}<br>'
+            f'<span style="font-size:10px;color:#6C7280;font-weight:400;">'
+            f'{secondary}</span></div>'
+            f'<div class="ce-history-summary">'
+            f'Origen: cierre <code>{p["origin_report_id"]}</code> '
+            f'(reporte del {p["origin_date"]})'
+            f'</div>'
+            f'<div class="ce-history-amount">{_fmt_q(p["amount"])}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with col_action:
+        if current_user["role"] == "admin":
+            if st.button("🗑", key=f"del_pend_{p['id']}",
+                         help="Eliminar este pendiente"):
+                if cash_history.delete_pending(p["id"]):
+                    st.success("Eliminado")
+                    st.rerun()
+
+    # Inline "Adjuntar" expander (only admin + viewer can resolve)
+    if current_user["role"] not in ("admin", "viewer"):
+        return
+
+    label = (
+        "📎 Adjuntar PDF de cierre del POS para resolver"
+        if row_type == "boleta_huerfana"
+        else "📎 Adjuntar boleta del banco para resolver"
+    )
+
+    with st.expander(label, expanded=False):
+        _render_inline_resolver(p, row_type, all_open_same_type, current_user)
+
+
+def _render_inline_resolver(p: dict, row_type: str,
+                              all_open_same_type: list[dict],
+                              current_user: dict) -> None:
+    """The actual upload + analyze + resolve flow inside the expander."""
+    file_key = f"resolve_upload_{p['id']}"
+    extract_state_key = f"resolve_extract_{p['id']}"
+
+    # Step 1: file upload
+    if row_type == "boleta_huerfana":
+        uploaded = st.file_uploader(
+            "Subir PDF del cierre del POS correspondiente",
+            type=["pdf"],
+            key=file_key,
+            label_visibility="collapsed",
+        )
+        help_text = (
+            "Sube el PDF del cierre de caja del POS cuyo depósito generó esta boleta."
+        )
+    else:
+        uploaded = st.file_uploader(
+            "Subir boleta del banco (foto o PDF)",
+            type=["jpg", "jpeg", "png", "webp", "pdf"],
+            key=file_key,
+            label_visibility="collapsed",
+        )
+        help_text = (
+            "Sube la foto o PDF de la boleta de banco que respalda este depósito."
+        )
+    st.caption(help_text)
+
+    if not uploaded:
+        # Clear any previous extract state
+        st.session_state.pop(extract_state_key, None)
+        return
+
+    # Step 2: read & extract (only once per upload)
+    extract = st.session_state.get(extract_state_key)
+    if extract is None or extract.get("filename") != uploaded.name:
+        with st.spinner("🔬 Leyendo el documento..."):
+            try:
+                uploaded.seek(0)
+                file_bytes = uploaded.read()
+                mime = uploaded.type or ""
+                if row_type == "boleta_huerfana":
+                    data = cash_reports.extract_pdf_data(file_bytes, uploaded.name)
+                    extract = {
+                        "kind": "pdf",
+                        "filename": uploaded.name,
+                        "ref": data.get("pos_ref", ""),
+                        "amount": float(data.get("deposito") or 0),
+                        "extra": {
+                            "store": data.get("store", ""),
+                            "cashier": data.get("cashier", ""),
+                            "credomatic": data.get("credomatic", 0),
+                            "visanet": data.get("visanet", 0),
+                            "efectivo": data.get("efectivo", 0),
+                        },
+                        "confidence": data.get("confidence", "medium"),
+                    }
+                else:
+                    data = cash_reports.extract_slip_data(file_bytes, mime, uploaded.name)
+                    extract = {
+                        "kind": "slip",
+                        "filename": uploaded.name,
+                        "ref": str(data.get("slip_number", "")),
+                        "amount": float(data.get("amount") or 0),
+                        "extra": {
+                            "date": data.get("date", ""),
+                            "is_reprint": data.get("is_reprint", False),
+                        },
+                        "confidence": data.get("confidence", "medium"),
+                    }
+                st.session_state[extract_state_key] = extract
+            except Exception as e:
+                st.error(f"No se pudo leer el documento: `{e}`")
+                return
+
+    # Step 3: validate & show results
+    ref = extract["ref"]
+    amount = extract["amount"]
+    confidence = extract.get("confidence", "medium")
+
+    # Show what we extracted
+    cfg_color = {"high": "#1B7340", "medium": "#D97706", "low": "#B91C1C"}.get(confidence, "#6C7280")
+    ref_label = "POS ref" if extract["kind"] == "pdf" else "J No."
+    st.markdown(
+        f"<div style='background:#FAFBFC;border:1px solid #E8EBF0;border-radius:4px;"
+        f"padding:12px 16px;margin:10px 0;'>"
+        f"<div style='font-size:10px;letter-spacing:2px;text-transform:uppercase;"
+        f"color:#6C7280;font-weight:600;margin-bottom:6px;'>"
+        f"Datos extraídos</div>"
+        f"<div style='font-size:13px;color:#0B0F19;line-height:1.6;'>"
+        f"<strong>{ref_label}:</strong> <code>{ref or '(no detectado)'}</code>  ·  "
+        f"<strong>Monto:</strong> {_fmt_q(amount)}  ·  "
+        f"<strong>Confianza:</strong> <span style='color:{cfg_color};'>{confidence}</span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    if not ref:
+        st.warning(
+            "⚠ No se pudo extraer el identificador del documento. "
+            "Verifica que la foto sea legible o usa un PDF más claro."
+        )
+        return
+
+    # Duplicate check
+    if extract["kind"] == "slip":
+        exists, where = cash_history.slip_number_exists_in_history(ref)
+    else:
+        exists, where = cash_history.pos_ref_exists_in_history(ref)
+    if exists:
+        st.error(
+            f"🚫 **Este documento ya está registrado en el historial.** "
+            f"`{ref}` ya existe en `{where}`. No se puede usar de nuevo."
+        )
+        return
+
+    # Combination detection: find combos of pendings that sum to this amount
+    open_pendings = [pp for pp in all_open_same_type if pp["id"] != p["id"]] + [p]
+    # Note: we treat p as "must include"; we want combos that include p OR combos that include other pendings
+    # Strategy: find ALL combos that sum to amount; later prioritize ones that include p
+
+    combos = cash_history.find_pending_combinations(amount, open_pendings, tolerance=1.0, max_size=3)
+
+    # Filter combos to those including this row's pending OR show all if same amount
+    combos_with_p = [c for c in combos if any(x["id"] == p["id"] for x in c)]
+
+    # ===== Decision: exact, partial, excess, or multi-pending =====
+    diff = amount - p["amount"]
+
+    if abs(diff) <= 1.0 and (not combos_with_p or len(combos_with_p[0]) == 1):
+        # Exact single match
+        st.success(
+            f"✅ **Cuadra exactamente** con este pendiente "
+            f"({_fmt_q(amount)} = {_fmt_q(p['amount'])})."
+        )
+        if st.button(
+            "Resolver pendiente",
+            key=f"resolve_btn_{p['id']}",
+            type="primary",
+            use_container_width=True,
+        ):
+            _do_resolve_pendings(
+                [p],
+                resolver_label=f"inline-{ref}",
+                slip_or_pdf_id=ref,
+                amount=amount,
+                note=f"Resuelto inline subiendo {extract['filename']}",
+            )
+
+    elif len(combos_with_p) > 1 or (combos_with_p and len(combos_with_p[0]) > 1):
+        # Multiple pendings can be resolved with this document
+        st.info(
+            f"🧮 **Esta {('boleta' if extract['kind']=='slip' else 'cierre')} de {_fmt_q(amount)} "
+            f"podría cubrir múltiples pendientes.** Elige la combinación correcta:"
+        )
+        for idx, combo in enumerate(combos_with_p[:5]):
+            ids_in_combo = [x["id"] for x in combo]
+            total = sum(x["amount"] for x in combo)
+            descs = []
+            for x in combo:
+                xd = x.get("details", {})
+                if x["type"] == "boleta_huerfana":
+                    descs.append(f"J No. {xd.get('slip_number','?')} ({_fmt_q(x['amount'])})")
+                else:
+                    descs.append(f"{xd.get('pos_ref','?')} · {xd.get('cashier','?')} ({_fmt_q(x['amount'])})")
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='font-size:12.5px;color:#0B0F19;line-height:1.6;'>"
+                    f"<strong>Combinación {idx+1}:</strong> {' + '.join(descs)}<br>"
+                    f"<span style='color:#6C7280;'>Total: {_fmt_q(total)}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    f"Resolver con esta combinación",
+                    key=f"resolve_combo_{p['id']}_{idx}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    _do_resolve_pendings(
+                        combo,
+                        resolver_label=f"inline-{ref}",
+                        slip_or_pdf_id=ref,
+                        amount=amount,
+                        note=f"Resuelto inline con combinación: {', '.join(ids_in_combo)}",
+                    )
+
+    elif diff < -1.0:
+        # Faltante: monto del documento es menor que el pendiente → resolución parcial
+        falt = abs(diff)
+        st.warning(
+            f"⚠ **Pago parcial.** El pendiente es de {_fmt_q(p['amount'])} pero el "
+            f"documento es de {_fmt_q(amount)}. Faltan **{_fmt_q(falt)}**.\n\n"
+            f"Al resolver, marcaremos este pendiente como cubierto y crearemos un "
+            f"nuevo pendiente de {_fmt_q(falt)} para cuando suban el complemento."
+        )
+        if st.button(
+            f"Aceptar pago parcial y crear pendiente por {_fmt_q(falt)}",
+            key=f"resolve_partial_{p['id']}",
+            type="primary",
+            use_container_width=True,
+        ):
+            _do_resolve_pendings_partial(
+                p,
+                resolver_label=f"inline-{ref}",
+                slip_or_pdf_id=ref,
+                amount=amount,
+                remainder=falt,
+                note=f"Pago parcial inline subiendo {extract['filename']}",
+            )
+
+    elif diff > 1.0:
+        # Excedente: el documento es mayor que el pendiente → alertar, NO resolver auto
+        excess = diff
+        st.error(
+            f"🚨 **Excedente sospechoso.** El pendiente es de {_fmt_q(p['amount'])} pero el "
+            f"documento es de {_fmt_q(amount)}. Sobran **{_fmt_q(excess)}**.\n\n"
+            f"Esta diferencia no se resuelve automáticamente. Posibles causas:\n"
+            f"- El documento cubre **más de un pendiente** — revisa si hay combinaciones arriba\n"
+            f"- El monto se ingresó mal en algún lado\n"
+            f"- Hay un depósito adicional que aún no se ha registrado\n\n"
+            f"Revisa manualmente antes de continuar."
+        )
+
+    else:
+        st.info("No se encontró cómo aplicar este documento. Verifica los datos.")
+
+
+def _do_resolve_pendings(pendings: list[dict], resolver_label: str,
+                          slip_or_pdf_id: str, amount: float, note: str):
+    """Mark pendings as resolved and update origin reports."""
+    try:
+        result = cash_history.resolve_pending_inline(
+            pending_ids=[x["id"] for x in pendings],
+            resolver_report_id=resolver_label,
+            slip_or_pdf_id=slip_or_pdf_id,
+            amount=amount,
+            note=note,
+        )
+        st.success(
+            f"✅ {result['resolved']} pendiente(s) resuelto(s) · "
+            f"{result['origin_reports_updated']} cierre(s) origen actualizado(s). "
+            f"La página se recargará en un momento."
+        )
+        st.balloons()
+        # Clear caches so the row disappears
+        cash_history.list_pending.clear()
+        cash_history.list_history.clear()
+        # Trigger rerun after a brief moment so the user sees the success
+        import time
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Error al resolver: `{e}`")
+
+
+def _do_resolve_pendings_partial(p: dict, resolver_label: str,
+                                   slip_or_pdf_id: str, amount: float,
+                                   remainder: float, note: str):
+    """Resolve a pending partially and create a remainder pending."""
+    try:
+        result = cash_history.resolve_pending_inline(
+            pending_ids=[p["id"]],
+            resolver_report_id=resolver_label,
+            slip_or_pdf_id=slip_or_pdf_id,
+            amount=amount,
+            note=note,
+        )
+        new_pid = cash_history.create_partial_remainder_pending(
+            original_pending=p,
+            remainder_amount=remainder,
+            note=note,
+        )
+        st.success(
+            f"✅ Pendiente cubierto parcialmente · Nuevo pendiente creado por "
+            f"{_fmt_q(remainder)} (ID: {new_pid}). La página se recargará."
+        )
+        cash_history.list_pending.clear()
+        cash_history.list_history.clear()
+        import time
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Error al resolver parcialmente: `{e}`")
+
+
 def _render_pending_tab(current_user: dict):
     try:
         pending = cash_history.list_pending(only_open=True)
@@ -757,31 +1102,16 @@ def _render_pending_tab(current_user: dict):
             f"🧾 Boletas huérfanas ({len(boletas_huerfanas)})</div>",
             unsafe_allow_html=True,
         )
+        st.caption(
+            "📎 Estas boletas existen pero no encontramos el PDF de cierre del POS que les corresponde. "
+            "Sube el PDF del cierre original con el botón **Adjuntar PDF**."
+        )
         for p in boletas_huerfanas:
-            d = p.get("details", {})
-            col_main, col_action = st.columns([5, 1])
-            with col_main:
-                st.markdown(
-                    f'<div class="ce-history-row">'
-                    f'<div class="ce-history-status-dot warning"></div>'
-                    f'<div class="ce-history-date">J No. {d.get("slip_number", "?")}<br>'
-                    f'<span style="font-size:10px;color:#6C7280;font-weight:400;">'
-                    f'Boleta del {d.get("date", "?")}</span></div>'
-                    f'<div class="ce-history-summary">'
-                    f'Origen: cierre <code>{p["origin_report_id"]}</code> '
-                    f'(reporte del {p["origin_date"]})'
-                    f'</div>'
-                    f'<div class="ce-history-amount">{_fmt_q(p["amount"])}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            with col_action:
-                if current_user["role"] == "admin":
-                    if st.button("🗑", key=f"del_pend_{p['id']}",
-                                 help="Eliminar este pendiente"):
-                        if cash_history.delete_pending(p["id"]):
-                            st.success("Eliminado")
-                            st.rerun()
+            _render_pending_row(
+                p, current_user,
+                row_type="boleta_huerfana",
+                all_open_same_type=boletas_huerfanas,
+            )
 
     # Depósitos sin boleta
     if depositos_sin_boleta:
@@ -791,31 +1121,16 @@ def _render_pending_tab(current_user: dict):
             f"📤 Depósitos sin boleta ({len(depositos_sin_boleta)})</div>",
             unsafe_allow_html=True,
         )
+        st.caption(
+            "📎 Estos depósitos se hicieron según el POS pero no hemos recibido la boleta del banco. "
+            "Cuando llegue la boleta, súbela con el botón **Adjuntar boleta** para cerrar el pendiente."
+        )
         for p in depositos_sin_boleta:
-            d = p.get("details", {})
-            col_main, col_action = st.columns([5, 1])
-            with col_main:
-                st.markdown(
-                    f'<div class="ce-history-row">'
-                    f'<div class="ce-history-status-dot warning"></div>'
-                    f'<div class="ce-history-date">{d.get("pos_ref", "?")}<br>'
-                    f'<span style="font-size:10px;color:#6C7280;font-weight:400;">'
-                    f'{d.get("cashier", "?")}</span></div>'
-                    f'<div class="ce-history-summary">'
-                    f'Origen: cierre <code>{p["origin_report_id"]}</code> '
-                    f'(reporte del {p["origin_date"]})'
-                    f'</div>'
-                    f'<div class="ce-history-amount">{_fmt_q(p["amount"])}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            with col_action:
-                if current_user["role"] == "admin":
-                    if st.button("🗑", key=f"del_pend_{p['id']}",
-                                 help="Eliminar este pendiente"):
-                        if cash_history.delete_pending(p["id"]):
-                            st.success("Eliminado")
-                            st.rerun()
+            _render_pending_row(
+                p, current_user,
+                row_type="deposito_sin_boleta",
+                all_open_same_type=depositos_sin_boleta,
+            )
 
 
 # ---------------------------------------------------------------------------
