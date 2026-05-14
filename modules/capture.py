@@ -1,14 +1,13 @@
 """
 Daily attendance capture form for Marisol.
 
-Key change: employees can be assigned to ANY store on a given day,
-not just their default store. The "Tienda" selector at the top determines
-the store for THIS day's shift. Each employee's row shows a small "APOYO"
-badge if they're being scheduled outside their default store.
-
-Schema:
-  - employees.store_id     → default store ("tienda principal")
-  - attendance.worked_store_id → store where they actually worked that day
+Flow:
+  - All active employees shown in one flat list, sorted alphabetically.
+  - Each employee has a "Tienda hoy" dropdown to pick where they're working today.
+  - The dropdown defaults to the employee's home store (employees.store_id), but
+    can be changed to any other store.
+  - The selected store is saved as `worked_store_id` for that day.
+  - If status != "working", store assignment is hidden (irrelevant for absent days).
 """
 
 from __future__ import annotations
@@ -95,42 +94,6 @@ def _inject_css():
 
         .emp-card-wrap { margin-bottom: 6px; }
 
-        /* Group header inside employee list */
-        .emp-group-header {
-            margin: 24px 0 12px;
-            padding: 8px 0;
-            border-bottom: 1px solid #D8DCE2;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .emp-group-header .label {
-            font-size: 11px;
-            letter-spacing: 2px;
-            text-transform: uppercase;
-            color: #0B0F19;
-            font-weight: 700;
-        }
-        .emp-group-header .count {
-            font-size: 10px;
-            color: #6C7280;
-            font-family: 'Geist Mono', monospace;
-        }
-        .emp-group-header .pill {
-            font-size: 9px;
-            font-weight: 700;
-            letter-spacing: 1.5px;
-            padding: 2px 7px;
-            border-radius: 3px;
-            text-transform: uppercase;
-        }
-        .emp-group-header .pill.home {
-            background: #D1FADF; color: #15803D;
-        }
-        .emp-group-header .pill.support {
-            background: #FFEDD5; color: #9A3412;
-        }
-
         /* Streamlit's radio horizontal — pills */
         div[role="radiogroup"] {
             gap: 6px !important;
@@ -193,7 +156,7 @@ def _format_date_helper(d):
     return ""
 
 
-def _render_emp_card(status_key, name, has_record, is_support):
+def _render_emp_card(status_key, name, has_record, is_support, home_store_name):
     """Render an employee name + status badge in a card."""
     initials = "".join([p[0] for p in name.split()[:2]]).upper() or "?"
     fg, bg = color_for_name(name)
@@ -222,6 +185,11 @@ def _render_emp_card(status_key, name, has_record, is_support):
         )
         guide = 'selecciona el estado del día y guarda'
 
+    home_meta = (
+        f'<span style="font-size:10.5px;color:#9CA3AF;">Tienda habitual: '
+        f'<strong style="color:#6C7280;">{home_store_name}</strong></span>'
+    )
+
     return (
         '<div style="background:#fff;border:1px solid #D8DCE2;border-radius:6px;'
         'padding:14px 18px;display:flex;align-items:center;gap:12px;">'
@@ -231,145 +199,9 @@ def _render_emp_card(status_key, name, has_record, is_support):
         f'letter-spacing:0.3px;">{initials}</div>'
         f'<div style="flex:1;"><div style="font-weight:600;font-size:14px;color:#0B0F19;'
         f'letter-spacing:-0.1px;">{name}{support_badge}{status_badge}</div>'
-        f'<div style="font-size:11px;color:#6C7280;margin-top:2px;">{guide}</div></div>'
+        f'<div style="font-size:11px;color:#6C7280;margin-top:2px;">{guide} · {home_meta}</div></div>'
         '</div>'
     )
-
-
-def _render_employee_form(emp, existing_rec, has_record, is_support,
-                          selected_store_id, date, prev_status_idx):
-    """Render the form for a single employee. Returns the record dict."""
-    st.markdown('<div class="emp-card-wrap">', unsafe_allow_html=True)
-    st.markdown(
-        _render_emp_card(
-            existing_rec.get("status", "") if has_record else "",
-            emp["name"], has_record, is_support,
-        ),
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        "<div style='margin: 12px 0 4px; font-size: 11px; letter-spacing: 1.5px; "
-        "text-transform: uppercase; color: #6C7280; font-weight: 600;'>"
-        "Estado del día</div>",
-        unsafe_allow_html=True,
-    )
-    status_choice = st.radio(
-        "Estado del día",
-        STATUS_KEYS,
-        format_func=lambda k: STATUS_LABEL[k],
-        index=prev_status_idx,
-        horizontal=True,
-        label_visibility="collapsed",
-        key=f"status_{emp['id']}",
-    )
-
-    st.markdown(
-        f"<div style='margin:-4px 0 12px;font-size:11.5px;color:#3D4554;"
-        f"font-style:italic;padding-left:4px;'>"
-        f"<span style='color:#C9982A;'>ℹ</span> {STATUS_HINT[status_choice]}</div>",
-        unsafe_allow_html=True,
-    )
-
-    record = {
-        "date": date.isoformat(),
-        "employee_id": emp["id"],
-        "status": status_choice,
-        "shift_start": None,
-        "shift_end": None,
-        "lunch_start": None,
-        "lunch_end": None,
-        "overtime_minutes": 0,
-        "is_late": False,
-        "actual_start": None,
-        "notes": "",
-        "worked_store_id": selected_store_id if status_choice == "working" else "",
-    }
-
-    if status_choice == "working":
-        d_ss = dt.time(9, 0)
-        d_se = dt.time(19, 0)
-        d_ls = dt.time(13, 0)
-        d_le = dt.time(14, 0)
-
-        sc = st.columns(4)
-        ss_t = sc[0].time_input(
-            "🕘 Entrada",
-            value=_parse_t(existing_rec.get("shift_start"), d_ss),
-            key=f"ss_{emp['id']}", step=1800,
-        )
-        se_t = sc[1].time_input(
-            "🕖 Salida",
-            value=_parse_t(existing_rec.get("shift_end"), d_se),
-            key=f"se_{emp['id']}", step=1800,
-        )
-        ls_t = sc[2].time_input(
-            "🍽 Almuerzo desde",
-            value=_parse_t(existing_rec.get("lunch_start"), d_ls),
-            key=f"ls_{emp['id']}", step=1800,
-        )
-        le_t = sc[3].time_input(
-            "🍽 Almuerzo hasta",
-            value=_parse_t(existing_rec.get("lunch_end"), d_le),
-            key=f"le_{emp['id']}", step=1800,
-        )
-
-        extra_cols = st.columns([1, 1, 2])
-        ot = extra_cols[0].number_input(
-            "⏰ Hora extra (min)", min_value=0, max_value=600, step=15,
-            value=int(existing_rec.get("overtime_minutes") or 0),
-            key=f"ot_{emp['id']}",
-        )
-        is_late = extra_cols[1].checkbox(
-            "Llegada tarde",
-            value=bool(existing_rec.get("is_late", False)),
-            key=f"late_{emp['id']}",
-        )
-        actual_start_t = None
-        if is_late:
-            actual_start_t = extra_cols[2].time_input(
-                "Hora real de llegada",
-                value=_parse_t(existing_rec.get("actual_start"), ss_t),
-                key=f"actstart_{emp['id']}", step=900,
-            )
-
-        notes_val = st.text_input(
-            "📝 Notas (opcional)",
-            value=existing_rec.get("notes", ""),
-            key=f"notes_w_{emp['id']}",
-            placeholder="Ej. Llegó tarde por tráfico · Salió temprano por cita",
-        )
-
-        record.update({
-            "shift_start": _time_or_none(ss_t),
-            "shift_end": _time_or_none(se_t),
-            "lunch_start": _time_or_none(ls_t),
-            "lunch_end": _time_or_none(le_t),
-            "overtime_minutes": int(ot),
-            "is_late": bool(is_late),
-            "actual_start": _time_or_none(actual_start_t) if is_late else None,
-            "notes": notes_val,
-        })
-    else:
-        placeholder_map = {
-            "day_off":    "Ej. Descanso semanal programado",
-            "permission": "Ej. Fue al doctor · Cita médica · Asunto familiar · No se presentó",
-            "vacation":   "Ej. Vacaciones programadas (inicio: X / fin: Y)",
-            "sick":       "Ej. Gripe · Incapacidad por 3 días · Cita médica",
-        }
-        record["notes"] = st.text_input(
-            "📝 Motivo / Nota",
-            value=existing_rec.get("notes", ""),
-            key=f"notes_a_{emp['id']}",
-            placeholder=placeholder_map.get(status_choice, ""),
-        )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<hr style='margin:18px 0 18px;border:none;border-top:1px solid #EBEEF2;'>",
-        unsafe_allow_html=True,
-    )
-    return record
 
 
 def render(current_user: dict) -> None:
@@ -396,14 +228,14 @@ def render(current_user: dict) -> None:
         <div class="cap-guide">
           <div class="ttl">💡 Guía rápida — Cómo registrar cada caso</div>
           <ul>
-            <li><strong>Trabajando normal:</strong> selecciona <strong>✅ Trabajando</strong>, ajusta horas si es necesario.</li>
+            <li><strong>Trabajando normal:</strong> selecciona <strong>✅ Trabajando</strong>, elige la <strong>tienda donde trabajará hoy</strong> y ajusta horas si es necesario.</li>
             <li><strong>Llegó tarde:</strong> mantén <strong>✅ Trabajando</strong> y marca <em>"Llegada tarde"</em> abajo.</li>
             <li><strong>Salió antes:</strong> mantén <strong>✅ Trabajando</strong> y cambia la hora de <em>Salida</em>.</li>
             <li><strong>No llegó / fue al doctor / asunto personal:</strong> selecciona <strong>📋 Permiso</strong> y escribe el motivo.</li>
             <li><strong>Enfermo / incapacidad:</strong> selecciona <strong>🤒 Enfermo</strong>.</li>
             <li><strong>Día libre / descanso programado:</strong> selecciona <strong>💤 Día libre</strong>.</li>
             <li><strong>Vacaciones:</strong> selecciona <strong>🏖️ Vacaciones</strong>.</li>
-            <li><strong>Apoyo a otra tienda:</strong> elige la tienda donde trabajará arriba — el sistema detecta y marca como <em>APOYO</em> si no es su tienda habitual.</li>
+            <li><strong>Apoyo a otra tienda:</strong> en la fila del empleado, simplemente cambia el dropdown <em>"Tienda hoy"</em> a la otra tienda. El sistema lo marcará como 🔀 Apoyo automáticamente.</li>
           </ul>
           <div style="margin-top:8px;font-size:12px;color:#6C7280;">
             <strong>Para corregir un registro ya guardado:</strong> cambia los valores y vuelve a guardar.
@@ -413,8 +245,8 @@ def render(current_user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # Date + store selectors
-    col1, col2, col3 = st.columns([1, 1, 1])
+    # Date selector
+    col1, col2 = st.columns([1, 1])
 
     with col1:
         date = st.date_input(
@@ -426,6 +258,13 @@ def render(current_user: dict) -> None:
         helper = _format_date_helper(date)
         if helper:
             st.caption(f"📅 {helper}")
+
+    with col2:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("↻ Recargar empleados", use_container_width=True):
+            sheets.get_employees.clear()
+            sheets.get_stores.clear()
+            st.rerun()
 
     try:
         stores = sheets.get_stores()
@@ -441,28 +280,15 @@ def render(current_user: dict) -> None:
         )
         return
 
-    with col2:
-        store_options = [s["id"] for s in stores]
-        store_labels = {s["id"]: s["name"] for s in stores}
-        idx = 0
-        if st.session_state.get("cap_store") in store_options:
-            idx = store_options.index(st.session_state["cap_store"])
-        selected_store_id = st.selectbox(
-            "Tienda donde trabajarán hoy",
-            store_options,
-            format_func=lambda x: store_labels[x],
-            index=idx,
-            help="Todos los empleados que registres aquí quedarán asignados a esta tienda "
-                 "para este día. Si alguno es de la otra tienda, se mostrará como 'Apoyo'.",
+    if not employees:
+        st.info(
+            "No hay empleados activos en el sistema. "
+            "Agrégalos desde Administración."
         )
-        st.session_state.cap_store = selected_store_id
+        return
 
-    with col3:
-        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-        if st.button("↻ Recargar empleados", use_container_width=True):
-            sheets.get_employees.clear()
-            sheets.get_stores.clear()
-            st.rerun()
+    store_options = [s["id"] for s in stores]
+    store_labels = {s["id"]: s["name"] for s in stores}
 
     # Existing records for that date
     try:
@@ -472,171 +298,224 @@ def render(current_user: dict) -> None:
         return
     existing_by_emp = {r["employee_id"]: r for r in existing}
 
-    # ALL active employees — split into "home" and "support" relative to selected store
-    if not employees:
-        st.info(
-            "No hay empleados activos en el sistema. "
-            "Agrégalos desde Administración."
-        )
-        return
+    # Sort all employees alphabetically
+    employees_sorted = sorted(employees, key=lambda e: e["name"].lower())
 
-    home_emps = [e for e in employees if e["store_id"] == selected_store_id]
-    support_emps = [e for e in employees if e["store_id"] != selected_store_id]
-    # Sort each alphabetically
-    home_emps.sort(key=lambda e: e["name"].lower())
-    support_emps.sort(key=lambda e: e["name"].lower())
-
-    # Summary header
-    saved_count = sum(
-        1 for emp in employees
-        if emp["id"] in existing_by_emp
-        and existing_by_emp[emp["id"]].get("worked_store_id") == selected_store_id
-    )
-    total_for_this_store = len(home_emps)
+    # Summary
+    total = len(employees_sorted)
+    saved = sum(1 for e in employees_sorted if e["id"] in existing_by_emp)
+    pending_count = total - saved
 
     st.markdown(
-        f"<div style='margin:18px 0 4px;display:flex;justify-content:space-between;"
+        f"<div style='margin:18px 0 10px;display:flex;justify-content:space-between;"
         f"align-items:baseline;flex-wrap:wrap;gap:8px;'>"
         f"<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
         f"color:#6C7280;font-weight:600;'>"
-        f"{store_labels[selected_store_id]} · personal habitual: {total_for_this_store}</div>"
-        f"<div style='font-size:11px;color:#1B7340;font-weight:600;'>"
-        f"✓ {saved_count} ya registrados para esta tienda hoy</div>"
-        f"</div>",
+        f"Personal · {total} empleado(s) activo(s)</div>"
+        f"<div style='font-size:11px;font-weight:600;'>"
+        f"<span style='color:#1B7340;'>✓ {saved} registrados</span>"
+        f"<span style='color:#9CA3AF;margin:0 8px;'>·</span>"
+        f"<span style='color:#B42318;'>● {pending_count} pendiente(s)</span>"
+        f"</div></div>",
         unsafe_allow_html=True,
     )
 
-    # ============== Group 1: Personal habitual de esta tienda ==============
-    st.markdown(
-        f'<div class="emp-group-header">'
-        f'<span class="pill home">PERSONAL HABITUAL</span>'
-        f'<span class="label">{store_labels[selected_store_id]}</span>'
-        f'<span class="count">· {len(home_emps)} empleado(s)</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    # ============== Single flat list of all employees ==============
 
     pending = []
 
-    for emp in home_emps:
+    for emp in employees_sorted:
         existing_rec = existing_by_emp.get(emp["id"], {})
         has_record = bool(existing_rec)
         prev_status = existing_rec.get("status", "working")
-        status_idx = next(
-            (i for i, k in enumerate(STATUS_KEYS) if k == prev_status), 0
-        )
-        record = _render_employee_form(
-            emp, existing_rec, has_record,
-            is_support=False,
-            selected_store_id=selected_store_id,
-            date=date,
-            prev_status_idx=status_idx,
-        )
-        pending.append(record)
 
-    # ============== Group 2: Personal de apoyo (otra tienda) ==============
-    if support_emps:
-        # Determine the OTHER store name
-        other_store_label = next(
-            (s["name"] for s in stores if s["id"] != selected_store_id), "Otra tienda"
+        # Determine which store to show by default in the dropdown:
+        # 1) If there's an existing record with worked_store_id, use that
+        # 2) Else use employee's home store
+        prev_worked = (existing_rec.get("worked_store_id") or "").strip()
+        if prev_worked and prev_worked in store_options:
+            default_store = prev_worked
+        else:
+            default_store = emp["store_id"]
+
+        # is_support if the (current selection) differs from home store and status is working
+        home_store_name = store_labels.get(emp["store_id"], "?")
+
+        # Use session state to know the CURRENT selection (live)
+        store_key = f"store_{emp['id']}"
+        current_store = st.session_state.get(store_key, default_store)
+        is_support_now = (
+            prev_status == "working"
+            and current_store != emp["store_id"]
         )
+
+        st.markdown('<div class="emp-card-wrap">', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="emp-group-header">'
-            f'<span class="pill support">APOYO</span>'
-            f'<span class="label">Personal de {other_store_label}</span>'
-            f'<span class="count">· {len(support_emps)} disponible(s)</span>'
-            f'</div>',
+            _render_emp_card(
+                prev_status if has_record else "",
+                emp["name"], has_record, is_support_now, home_store_name,
+            ),
             unsafe_allow_html=True,
         )
 
-        st.caption(
-            f"💡 Estos empleados son de {other_store_label}. "
-            f"Si **algún** empleado de la otra tienda apoyó en {store_labels[selected_store_id]} hoy, "
-            "selecciona 'Trabajando' y registra sus horarios. Si no apoyó, **déjalo en blanco** "
-            "(no necesitas marcarle 'día libre' aquí — ese registro lo haces cuando captures su tienda)."
+        # Status pills
+        st.markdown(
+            "<div style='margin: 12px 0 4px; font-size: 11px; letter-spacing: 1.5px; "
+            "text-transform: uppercase; color: #6C7280; font-weight: 600;'>"
+            "Estado del día</div>",
+            unsafe_allow_html=True,
+        )
+        status_idx = next((i for i, k in enumerate(STATUS_KEYS) if k == prev_status), 0)
+        status_choice = st.radio(
+            "Estado del día",
+            STATUS_KEYS,
+            format_func=lambda k: STATUS_LABEL[k],
+            index=status_idx,
+            horizontal=True,
+            label_visibility="collapsed",
+            key=f"status_{emp['id']}",
         )
 
-        with st.expander(
-            f"Mostrar {len(support_emps)} empleado(s) de {other_store_label}",
-            expanded=False,
-        ):
-            for emp in support_emps:
-                existing_rec = existing_by_emp.get(emp["id"], {})
-                has_record = bool(existing_rec)
-                worked_here = existing_rec.get("worked_store_id") == selected_store_id
+        st.markdown(
+            f"<div style='margin:-4px 0 12px;font-size:11.5px;color:#3D4554;"
+            f"font-style:italic;padding-left:4px;'>"
+            f"<span style='color:#C9982A;'>ℹ</span> {STATUS_HINT[status_choice]}</div>",
+            unsafe_allow_html=True,
+        )
 
-                # Only show as "has_record" relative to THIS store's view
-                # if their worked_store_id matches THIS store
-                effective_has_record = has_record and worked_here
+        record = {
+            "date": date.isoformat(),
+            "employee_id": emp["id"],
+            "status": status_choice,
+            "shift_start": None,
+            "shift_end": None,
+            "lunch_start": None,
+            "lunch_end": None,
+            "overtime_minutes": 0,
+            "is_late": False,
+            "actual_start": None,
+            "notes": "",
+            "worked_store_id": "",
+        }
 
-                prev_status = existing_rec.get("status", "working") if worked_here else "working"
-                status_idx = next(
-                    (i for i, k in enumerate(STATUS_KEYS) if k == prev_status), 0
+        if status_choice == "working":
+            # Store dropdown
+            store_idx = store_options.index(default_store) if default_store in store_options else 0
+            chosen_store = st.selectbox(
+                "🏪 Tienda donde trabajará hoy",
+                store_options,
+                format_func=lambda x: store_labels[x],
+                index=store_idx,
+                key=store_key,
+                help="Elige la tienda donde este empleado trabaja HOY. "
+                     "Puede ser distinta a su tienda habitual.",
+            )
+            record["worked_store_id"] = chosen_store
+
+            d_ss = dt.time(9, 0)
+            d_se = dt.time(19, 0)
+            d_ls = dt.time(13, 0)
+            d_le = dt.time(14, 0)
+
+            sc = st.columns(4)
+            ss_t = sc[0].time_input(
+                "🕘 Entrada",
+                value=_parse_t(existing_rec.get("shift_start"), d_ss),
+                key=f"ss_{emp['id']}", step=1800,
+            )
+            se_t = sc[1].time_input(
+                "🕖 Salida",
+                value=_parse_t(existing_rec.get("shift_end"), d_se),
+                key=f"se_{emp['id']}", step=1800,
+            )
+            ls_t = sc[2].time_input(
+                "🍽 Almuerzo desde",
+                value=_parse_t(existing_rec.get("lunch_start"), d_ls),
+                key=f"ls_{emp['id']}", step=1800,
+            )
+            le_t = sc[3].time_input(
+                "🍽 Almuerzo hasta",
+                value=_parse_t(existing_rec.get("lunch_end"), d_le),
+                key=f"le_{emp['id']}", step=1800,
+            )
+
+            extra_cols = st.columns([1, 1, 2])
+            ot = extra_cols[0].number_input(
+                "⏰ Hora extra (min)", min_value=0, max_value=600, step=15,
+                value=int(existing_rec.get("overtime_minutes") or 0),
+                key=f"ot_{emp['id']}",
+            )
+            is_late = extra_cols[1].checkbox(
+                "Llegada tarde",
+                value=bool(existing_rec.get("is_late", False)),
+                key=f"late_{emp['id']}",
+            )
+            actual_start_t = None
+            if is_late:
+                actual_start_t = extra_cols[2].time_input(
+                    "Hora real de llegada",
+                    value=_parse_t(existing_rec.get("actual_start"), ss_t),
+                    key=f"actstart_{emp['id']}", step=900,
                 )
 
-                record = _render_employee_form(
-                    emp,
-                    existing_rec if worked_here else {},
-                    effective_has_record,
-                    is_support=True,
-                    selected_store_id=selected_store_id,
-                    date=date,
-                    prev_status_idx=status_idx,
-                )
-                pending.append(record)
+            notes_val = st.text_input(
+                "📝 Notas (opcional)",
+                value=existing_rec.get("notes", ""),
+                key=f"notes_w_{emp['id']}",
+                placeholder="Ej. Llegó tarde por tráfico · Salió temprano por cita",
+            )
+
+            record.update({
+                "shift_start": _time_or_none(ss_t),
+                "shift_end": _time_or_none(se_t),
+                "lunch_start": _time_or_none(ls_t),
+                "lunch_end": _time_or_none(le_t),
+                "overtime_minutes": int(ot),
+                "is_late": bool(is_late),
+                "actual_start": _time_or_none(actual_start_t) if is_late else None,
+                "notes": notes_val,
+            })
+        else:
+            placeholder_map = {
+                "day_off":    "Ej. Descanso semanal programado",
+                "permission": "Ej. Fue al doctor · Cita médica · Asunto familiar · No se presentó",
+                "vacation":   "Ej. Vacaciones programadas (inicio: X / fin: Y)",
+                "sick":       "Ej. Gripe · Incapacidad por 3 días · Cita médica",
+            }
+            record["notes"] = st.text_input(
+                "📝 Motivo / Nota",
+                value=existing_rec.get("notes", ""),
+                key=f"notes_a_{emp['id']}",
+                placeholder=placeholder_map.get(status_choice, ""),
+            )
+            # For non-working status, preserve any existing worked_store_id (for historical accuracy)
+            # or leave blank
+            record["worked_store_id"] = existing_rec.get("worked_store_id", "") or ""
+
+        pending.append(record)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<hr style='margin:18px 0 18px;border:none;border-top:1px solid #EBEEF2;'>",
+            unsafe_allow_html=True,
+        )
 
     # Save
     st.markdown("---")
     save_cols = st.columns([3, 1])
     with save_cols[1]:
         if st.button(
-            "💾 Guardar / Actualizar",
+            "💾 Guardar / Actualizar todos",
             use_container_width=True,
             type="primary",
         ):
             try:
                 saved_n = 0
                 for rec in pending:
-                    # SKIP support employees that don't have a working status AND
-                    # were never recorded at this store. We only persist explicit
-                    # decisions to avoid wiping out their record in the other store.
-                    existing = existing_by_emp.get(rec["employee_id"], {})
-                    came_from_other_store = (
-                        existing
-                        and existing.get("worked_store_id")
-                        and existing.get("worked_store_id") != selected_store_id
-                    )
-                    is_support_emp = any(
-                        e["id"] == rec["employee_id"] and e["store_id"] != selected_store_id
-                        for e in employees
-                    )
-
-                    # If support employee with no working status and no prior record at THIS store,
-                    # skip — Marisol didn't actively schedule them here.
-                    if (is_support_emp
-                            and rec["status"] != "working"
-                            and not (existing and existing.get("worked_store_id") == selected_store_id)):
-                        continue
-
-                    # If a support employee is being scheduled here as "working", ensure
-                    # worked_store_id is set to the current selected store
-                    if rec["status"] == "working":
-                        rec["worked_store_id"] = selected_store_id
-                    else:
-                        # Non-working statuses: preserve worked_store_id from any existing
-                        # record so we don't overwrite a store assignment with blank
-                        rec["worked_store_id"] = (
-                            existing.get("worked_store_id")
-                            or selected_store_id
-                        )
-
                     sheets.upsert_attendance(rec, updated_by=current_user["email"])
                     saved_n += 1
 
-                st.success(
-                    f"✓ Guardados {saved_n} registro(s) "
-                    f"· {store_labels[selected_store_id]} · {date.isoformat()}"
-                )
+                st.success(f"✓ Guardados {saved_n} registro(s) · {date.isoformat()}")
                 st.balloons()
                 sheets.get_attendance_for_date.clear()
             except Exception as e:
@@ -644,6 +523,6 @@ def render(current_user: dict) -> None:
 
     with save_cols[0]:
         st.caption(
-            "Se guardarán los registros que tengan cambios. "
-            "El personal de apoyo solo se registra si lo marcas como **Trabajando**."
+            "Al guardar, se actualizan todos los empleados según lo que hayas seleccionado. "
+            "Los cambios son inmediatos en el dashboard."
         )
