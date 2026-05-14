@@ -430,7 +430,7 @@ def _render_section_photos(bucket_key: str, section_number: int,
 
     uploaded = st.file_uploader(
         f"Subir foto(s) — {title}",
-        type=["jpg", "jpeg", "png", "webp"],
+        type=["jpg", "jpeg", "png", "webp", "pdf"],
         accept_multiple_files=True,
         key=f"cc_upload_{bucket_key}",
         label_visibility="collapsed",
@@ -719,49 +719,69 @@ def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
                 },
             })
 
-    # Section 2: NEONET / Credomatic photos
+    # Section 2: NEONET / Credomatic photos (or PDFs)
     if neonet:
         blocks.append({
             "type": "text",
-            "text": f"\n=== SECCIÓN 2: FOTOS NEONET / CREDOMATIC ({len(neonet)} fotos) ==="
+            "text": f"\n=== SECCIÓN 2: TICKETS NEONET / CREDOMATIC ({len(neonet)} archivos) ==="
         })
         for f in neonet:
             blocks.append({
                 "type": "text",
-                "text": f"--- Foto: {f['name']} ---",
+                "text": f"--- Archivo: {f['name']} ---",
             })
-            blocks.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": f["mime"] if f["mime"] in (
-                        "image/jpeg", "image/png", "image/gif", "image/webp"
-                    ) else "image/jpeg",
-                    "data": _to_base64(f["data"]),
-                },
-            })
+            if "pdf" in (f["mime"] or "").lower() or f["name"].lower().endswith(".pdf"):
+                blocks.append({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": _to_base64(f["data"]),
+                    },
+                })
+            else:
+                blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": f["mime"] if f["mime"] in (
+                            "image/jpeg", "image/png", "image/gif", "image/webp"
+                        ) else "image/jpeg",
+                        "data": _to_base64(f["data"]),
+                    },
+                })
 
-    # Section 3: Bank slips
+    # Section 3: Bank slips (photos or PDFs)
     if boletas:
         blocks.append({
             "type": "text",
-            "text": f"\n=== SECCIÓN 3: BOLETAS DE BANCO ({len(boletas)} fotos) ==="
+            "text": f"\n=== SECCIÓN 3: BOLETAS DE BANCO ({len(boletas)} archivos) ==="
         })
         for f in boletas:
             blocks.append({
                 "type": "text",
                 "text": f"--- Boleta: {f['name']} ---",
             })
-            blocks.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": f["mime"] if f["mime"] in (
-                        "image/jpeg", "image/png", "image/gif", "image/webp"
-                    ) else "image/jpeg",
-                    "data": _to_base64(f["data"]),
-                },
-            })
+            if "pdf" in (f["mime"] or "").lower() or f["name"].lower().endswith(".pdf"):
+                blocks.append({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": _to_base64(f["data"]),
+                    },
+                })
+            else:
+                blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": f["mime"] if f["mime"] in (
+                            "image/jpeg", "image/png", "image/gif", "image/webp"
+                        ) else "image/jpeg",
+                        "data": _to_base64(f["data"]),
+                    },
+                })
 
     blocks.append({
         "type": "text",
