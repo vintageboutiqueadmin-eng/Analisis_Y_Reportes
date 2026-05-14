@@ -89,6 +89,80 @@ def _compute_stats(employees, records_by_emp, now_min):
     }
 
 
+def _parse_hhmm_to_minutes(s):
+    """Convert 'HH:MM' to minutes since midnight, or None."""
+    if not s:
+        return None
+    try:
+        h, m = str(s).split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+def _choose_active_segment(rec, now_min):
+    """
+    For a working employee with possibly 2 segments, decide which segment is
+    "active" right now. Returns dict {store_id, shift_start, shift_end, is_seg2}.
+
+    Logic:
+      - If single shift (no split): always return segment 1.
+      - If split:
+          * If now is within segment 1 range → segment 1
+          * If now is within segment 2 range → segment 2
+          * If now < segment 1 start → segment 1 (the day hasn't started yet)
+          * If now > segment 2 end → segment 2 (the day is over, show last segment)
+          * If now is between segments → segment 1 (transition period)
+      - now_min may be None (looking at a non-today date) — default to segment 1.
+    """
+    s1_store = rec.get("worked_store_id") or ""
+    s1_start = rec.get("shift_start") or ""
+    s1_end = rec.get("shift_end") or ""
+
+    if not rec.get("shift_split"):
+        return {
+            "store_id": s1_store,
+            "shift_start": s1_start,
+            "shift_end": s1_end,
+            "is_seg2": False,
+        }
+
+    s2_store = rec.get("segment2_store_id") or ""
+    s2_start = rec.get("segment2_start") or ""
+    s2_end = rec.get("segment2_end") or ""
+
+    # If we have no "now" reference, return segment 1 by default
+    if now_min is None:
+        return {
+            "store_id": s1_store,
+            "shift_start": s1_start,
+            "shift_end": s1_end,
+            "is_seg2": False,
+        }
+
+    s1_start_min = _parse_hhmm_to_minutes(s1_start)
+    s1_end_min = _parse_hhmm_to_minutes(s1_end)
+    s2_start_min = _parse_hhmm_to_minutes(s2_start)
+    s2_end_min = _parse_hhmm_to_minutes(s2_end)
+
+    # If segment 2 is active or already over, use segment 2
+    if s2_start_min is not None and now_min >= s2_start_min:
+        return {
+            "store_id": s2_store,
+            "shift_start": s2_start,
+            "shift_end": s2_end,
+            "is_seg2": True,
+        }
+
+    # Otherwise segment 1
+    return {
+        "store_id": s1_store,
+        "shift_start": s1_start,
+        "shift_end": s1_end,
+        "is_seg2": False,
+    }
+
+
 def _build_data(date: dt.date) -> dict:
     employees = sheets.get_employees()
     stores = sheets.get_stores()
@@ -98,60 +172,75 @@ def _build_data(date: dt.date) -> dict:
     now_min = _now_minutes_for(date)
     stats = _compute_stats(employees, records_by_emp, now_min)
 
-    # Look up: employee_id -> employee dict (with default store_id)
-    emp_by_id = {e["id"]: e for e in employees}
-
-    # Decide where each employee BELONGS in the dashboard for this date.
-    # Priority:
-    #   1. If they have a record with worked_store_id → show at that store
-    #   2. Else if they have a record but no worked_store_id (legacy data) → show at their default store
-    #   3. Else (no record at all) → show at their default store as "Sin asignación"
+    # Build per-store buckets
     store_employees_map = {s["id"]: [] for s in stores}
 
     for emp in employees:
         rec = records_by_emp.get(emp["id"])
-        if rec:
-            worked = (rec.get("worked_store_id") or "").strip()
-            target_store = worked if worked in store_employees_map else emp["store_id"]
-        else:
-            target_store = emp["store_id"]
-
-        if target_store not in store_employees_map:
-            # Edge case: emp's default store no longer exists
-            continue
-
-        is_support = (
-            rec is not None
-            and rec.get("status") == "working"
-            and target_store != emp["store_id"]
-        )
 
         if not rec:
-            store_employees_map[target_store].append({
-                "name": emp["name"],
-                "status": "day_off",
-                "notes": "Sin asignación para esta fecha",
-                "is_support": False,
-            })
-        else:
-            store_employees_map[target_store].append({
-                "name": emp["name"],
-                "status": rec.get("status", "working"),
-                "shift_start": rec.get("shift_start"),
-                "shift_end": rec.get("shift_end"),
-                "lunch_start": rec.get("lunch_start"),
-                "lunch_end": rec.get("lunch_end"),
-                "overtime_minutes": rec.get("overtime_minutes") or 0,
-                "is_late": rec.get("is_late", False),
-                "actual_start": rec.get("actual_start"),
-                "notes": rec.get("notes", ""),
-                "is_support": is_support,
-            })
+            # No record → show at home store as "Sin asignación"
+            target_store = emp["store_id"]
+            if target_store in store_employees_map:
+                store_employees_map[target_store].append({
+                    "name": emp["name"],
+                    "status": "day_off",
+                    "notes": "Sin asignación para esta fecha",
+                    "is_support": False,
+                })
+            continue
+
+        status = rec.get("status", "working")
+
+        # For non-working statuses, pin to home store
+        if status != "working":
+            target_store = emp["store_id"]
+            if target_store in store_employees_map:
+                store_employees_map[target_store].append({
+                    "name": emp["name"],
+                    "status": status,
+                    "shift_start": rec.get("shift_start"),
+                    "shift_end": rec.get("shift_end"),
+                    "lunch_start": rec.get("lunch_start"),
+                    "lunch_end": rec.get("lunch_end"),
+                    "overtime_minutes": rec.get("overtime_minutes") or 0,
+                    "is_late": rec.get("is_late", False),
+                    "actual_start": rec.get("actual_start"),
+                    "notes": rec.get("notes", ""),
+                    "is_support": False,
+                })
+            continue
+
+        # WORKING — figure out which segment is currently active
+        active = _choose_active_segment(rec, now_min)
+        target_store = active["store_id"] or emp["store_id"]
+        if target_store not in store_employees_map:
+            target_store = emp["store_id"]
+            if target_store not in store_employees_map:
+                continue
+
+        # Support badge applies per active segment: if active segment's store
+        # is not the employee's home store, show "Apoyo"
+        is_support = (target_store != emp["store_id"])
+
+        store_employees_map[target_store].append({
+            "name": emp["name"],
+            "status": "working",
+            "shift_start": active["shift_start"],
+            "shift_end": active["shift_end"],
+            "lunch_start": rec.get("lunch_start"),
+            "lunch_end": rec.get("lunch_end"),
+            "overtime_minutes": rec.get("overtime_minutes") or 0,
+            "is_late": rec.get("is_late", False),
+            "actual_start": rec.get("actual_start"),
+            "notes": rec.get("notes", ""),
+            "is_support": is_support,
+            "is_split_segment": active["is_seg2"],
+        })
 
     stores_out = []
     for store in stores:
         emps_here = store_employees_map.get(store["id"], [])
-        # Sort: working first, then by name
         emps_here.sort(
             key=lambda e: (0 if e.get("status") == "working" else 1, e["name"])
         )
