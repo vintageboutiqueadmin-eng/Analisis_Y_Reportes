@@ -828,6 +828,125 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
 
 
 # ---------------------------------------------------------------------------
+# Lightweight single-document extractors (for inline pending resolution)
+# ---------------------------------------------------------------------------
+
+EXTRACT_SLIP_PROMPT = """Eres un asistente que extrae datos de UNA boleta de depósito bancario (Banco G&T Continental u otro). La boleta puede ser foto o PDF.
+
+Extrae:
+- slip_number: el campo "J No. XXXXXXXX" (número rojo grande arriba) o "No. Comprobante: XXXXXXXX". SON EL MISMO NÚMERO.
+- amount: el "TOTAL DEPOSITO" o monto total depositado, como número decimal en GTQ.
+- date: la fecha de la boleta (formato YYYY-MM-DD si es posible).
+- is_reprint: true si la boleta dice "REIMPRESION" arriba.
+
+Devuelve SOLO un JSON con esta forma exacta, sin texto adicional ni markdown:
+{
+  "slip_number": "50613432",
+  "amount": 1979.50,
+  "date": "2026-05-13",
+  "is_reprint": false,
+  "confidence": "high" | "medium" | "low",
+  "notes": ""
+}
+
+Si no puedes leer un campo, ponlo en blanco/null y baja la confidence."""
+
+
+EXTRACT_PDF_PROMPT = """Eres un asistente que extrae datos de UN PDF de cierre de caja del POS de una tienda minorista.
+
+Extrae:
+- pos_ref: el número POS/AAAA/MM/DD/NNNN
+- store: la tienda ("6ta Avenida" o "7ma Avenida")
+- cashier: el nombre del cajero
+- credomatic: total de tarjeta CREDOMATIC
+- visanet: total de tarjeta VISANET
+- efectivo: total de efectivo cobrado
+- deposito: total depositado al banco según el PDF
+
+Devuelve SOLO un JSON con esta forma exacta, sin texto adicional ni markdown:
+{
+  "pos_ref": "POS/2026/05/12/7488",
+  "store": "6ta Avenida",
+  "cashier": "SextaAlejandra",
+  "credomatic": 1605.00,
+  "visanet": 0.00,
+  "efectivo": 1697.00,
+  "deposito": 1697.00,
+  "confidence": "high" | "medium" | "low",
+  "notes": ""
+}"""
+
+
+def extract_slip_data(file_bytes: bytes, mime: str, filename: str) -> dict:
+    """Extract structured data from ONE bank slip (photo or PDF)."""
+    import anthropic
+    api_key = st.secrets["anthropic"]["api_key"]
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content_blocks = [{
+        "type": "text",
+        "text": f"Archivo: {filename}",
+    }]
+    if "pdf" in (mime or "").lower() or filename.lower().endswith(".pdf"):
+        content_blocks.append({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": _to_base64(file_bytes),
+            },
+        })
+    else:
+        media = mime if mime in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media,
+                "data": _to_base64(file_bytes),
+            },
+        })
+
+    response = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=500,
+        system=EXTRACT_SLIP_PROMPT,
+        messages=[{"role": "user", "content": content_blocks}],
+    )
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
+def extract_pdf_data(file_bytes: bytes, filename: str) -> dict:
+    """Extract structured data from ONE POS closing PDF."""
+    import anthropic
+    api_key = st.secrets["anthropic"]["api_key"]
+    client = anthropic.Anthropic(api_key=api_key)
+
+    response = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=500,
+        system=EXTRACT_PDF_PROMPT,
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": f"Archivo: {filename}"},
+            {"type": "document", "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": _to_base64(file_bytes),
+            }},
+        ]}],
+    )
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
+# ---------------------------------------------------------------------------
 # Render report
 # ---------------------------------------------------------------------------
 
