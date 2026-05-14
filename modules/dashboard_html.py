@@ -290,6 +290,12 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
 .vb-emp-meta { flex: 1; min-width: 0; }
 .vb-emp-name { font-weight: 600; font-size: 12px; color: var(--ink); margin-bottom: 2px;
   letter-spacing: -0.1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vb-support-badge {
+    display: inline-block; margin-left: 6px; padding: 1px 6px;
+    background: #FFEDD5; color: #9A3412; font-size: 8.5px; font-weight: 700;
+    letter-spacing: 1px; border-radius: 2px; text-transform: uppercase;
+    vertical-align: middle;
+}
 .vb-emp-times { font-size: 9.5px; color: var(--ink-3); display: flex; align-items: center;
   gap: 4px; font-family: var(--mono); flex-wrap: wrap; line-height: 1.3; }
 .vb-emp-times .dot { width: 2px; height: 2px; background: var(--ink-4); border-radius: 50%; }
@@ -617,6 +623,12 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
     fg_color, bg_color = color_for_name(name)
     avatar_style = f"background:{bg_color};color:{fg_color};border-color:{bg_color};"
 
+    # Support badge — when employee is working at a non-default store
+    is_support = emp.get("is_support", False)
+    support_badge = (
+        '<span class="vb-support-badge">🔀 Apoyo</span>' if is_support else ""
+    )
+
     total_hours = end_h - start_h
     half_step = f"calc((100% / {total_hours * 2}))"
     hour_step = f"calc((100% / {total_hours}))"
@@ -704,7 +716,7 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
   <div class="vb-emp-info">
     <div class="vb-avatar" style="{avatar_style}">{initials}</div>
     <div class="vb-emp-meta">
-      <div class="vb-emp-name">{name}</div>
+      <div class="vb-emp-name">{name}{support_badge}</div>
       <div class="vb-emp-times">{''.join(time_line_parts)}</div>
     </div>
   </div>
@@ -733,7 +745,7 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
   <div class="vb-emp-info">
     <div class="vb-avatar" style="{avatar_style}">{initials}</div>
     <div class="vb-emp-meta">
-      <div class="vb-emp-name">{name}</div>
+      <div class="vb-emp-name">{name}{support_badge}</div>
       <div class="vb-emp-times">{sub_line}</div>
     </div>
   </div>
