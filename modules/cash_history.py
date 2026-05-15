@@ -318,12 +318,14 @@ def add_pending(pending_type: str, amount: float, origin_report_id: str,
 
 def add_pending_from_report(report: dict, report_id: str) -> dict:
     """
-    Given a completed analysis report, push missing_slips and orphan_slips
-    to the pending tray. Returns {added: N, missing: N, orphans: N}.
+    Given a completed analysis report, push missing_slips, orphan_slips, and
+    internal cashier differences to the pending tray.
+    Returns {added: N, missing: N, orphans: N, internal_diffs: N}.
     """
     bank = report.get("bank_reconciliation") or {}
     report_date = report.get("report_date") or ""
     added = 0
+    internal_diffs_count = 0
 
     # missing_slips → deposito_sin_boleta
     for m in (bank.get("missing_slips") or []):
@@ -359,10 +361,31 @@ def add_pending_from_report(report: dict, report_id: str) -> dict:
         )
         added += 1
 
+    # cashier_breakdown[i].diferencia_interna > 0 → diferencia_interna_cierre
+    for c in (report.get("cashier_breakdown") or []):
+        diff = _safe_float(c.get("diferencia_interna"))
+        if diff <= 0:
+            continue
+        add_pending(
+            pending_type="diferencia_interna_cierre",
+            amount=diff,
+            origin_report_id=report_id,
+            origin_date=report_date,
+            details={
+                "pos_ref": c.get("pos_ref", ""),
+                "cashier": c.get("cashier", ""),
+                "store": c.get("store", ""),
+                "note": c.get("notes", ""),
+            },
+        )
+        added += 1
+        internal_diffs_count += 1
+
     return {
         "added": added,
         "missing": len(bank.get("missing_slips") or []),
         "orphans": len(bank.get("orphan_slips") or []),
+        "internal_diffs": internal_diffs_count,
     }
 
 
@@ -434,21 +457,21 @@ def apply_resolutions_to_origin_reports(resolved_items: list[dict]) -> int:
         # Remove matched items from missing_slips and orphan_slips
         matched_pos_refs = set()
         matched_slip_numbers = set()
+        matched_internal_diffs = set()  # pos_refs whose internal diff was resolved
         for r in items:
             ptype = r.get("pending_type", "")
+            pending_id = r.get("pending_id", "")
+            full = list_pending(only_open=False)
+            pending_row = next((p for p in full if p["id"] == pending_id), None)
+            if not pending_row:
+                continue
+            details = pending_row.get("details", {}) or {}
             if ptype == "deposito_sin_boleta":
-                # We need to know which pos_ref. Look up the pending row.
-                pending_id = r.get("pending_id", "")
-                for p in list_pending(only_open=False):
-                    if p["id"] == pending_id:
-                        matched_pos_refs.add(p["details"].get("pos_ref", ""))
-                        break
+                matched_pos_refs.add(details.get("pos_ref", ""))
             elif ptype == "boleta_huerfana":
-                pending_id = r.get("pending_id", "")
-                for p in list_pending(only_open=False):
-                    if p["id"] == pending_id:
-                        matched_slip_numbers.add(p["details"].get("slip_number", ""))
-                        break
+                matched_slip_numbers.add(details.get("slip_number", ""))
+            elif ptype == "diferencia_interna_cierre":
+                matched_internal_diffs.add(details.get("pos_ref", ""))
 
         new_missing = [
             m for m in (bank.get("missing_slips") or [])
@@ -462,27 +485,47 @@ def apply_resolutions_to_origin_reports(resolved_items: list[dict]) -> int:
         bank["orphan_slips"] = new_orphans
         report["bank_reconciliation"] = bank
 
+        # Zero-out diferencia_interna for the resolved cashier entries
+        if matched_internal_diffs:
+            for c in (report.get("cashier_breakdown") or []):
+                if (c.get("pos_ref") or "") in matched_internal_diffs:
+                    c["diferencia_interna"] = 0
+                    note = c.get("notes", "")
+                    add = "[Diferencia interna resuelta posteriormente]"
+                    c["notes"] = f"{note} {add}".strip() if note else add
+
         # Append a finding noting the resolution
         findings = report.get("findings") or []
+        bits = []
+        if matched_pos_refs:
+            bits.append(f"{len(matched_pos_refs)} depósito(s) sin boleta")
+        if matched_slip_numbers:
+            bits.append(f"{len(matched_slip_numbers)} boleta(s) huérfana(s)")
+        if matched_internal_diffs:
+            bits.append(f"{len(matched_internal_diffs)} diferencia(s) interna(s)")
         findings.append({
             "severity": "ok",
             "title": "Pendientes resueltos posteriormente",
-            "detail": f"Algunos pendientes de este cierre fueron cuadrados en un análisis posterior. "
-                      f"Se quitaron {len(matched_pos_refs)} depósito(s) sin boleta y "
-                      f"{len(matched_slip_numbers)} boleta(s) huérfana(s) de la lista de discrepancias.",
+            "detail": f"Algunos pendientes de este cierre fueron cuadrados después: "
+                      f"{', '.join(bits) if bits else 'pendientes'}.",
         })
         report["findings"] = findings
 
         # Possibly improve overall_status if it was only "warning" because of these
-        if report.get("overall_status") == "warning" and not new_missing and not new_orphans:
-            # Check if there are other warning-grade findings
-            has_other_warnings = any(
-                f.get("severity") in ("warn", "alert")
-                for f in findings
-                if f.get("title") != "Pendientes resueltos posteriormente"
+        if report.get("overall_status") == "warning":
+            still_has_issues = (
+                new_missing or new_orphans or
+                any(_safe_float(c.get("diferencia_interna")) > 0
+                    for c in (report.get("cashier_breakdown") or []))
             )
-            if not has_other_warnings:
-                report["overall_status"] = "ok"
+            if not still_has_issues:
+                has_other_warnings = any(
+                    f.get("severity") in ("warn", "alert")
+                    for f in findings
+                    if f.get("title") != "Pendientes resueltos posteriormente"
+                )
+                if not has_other_warnings:
+                    report["overall_status"] = "ok"
 
         if update_report(origin_id, report):
             updated_count += 1
@@ -519,6 +562,89 @@ def find_pending_combinations(target_amount: float, pendings: list[dict],
     # Sort: prefer smaller combinations, then exactness
     results.sort(key=lambda x: (x["size"], x["delta"]))
     return [r["combo"] for r in results]
+
+
+def backfill_internal_diffs_from_history() -> dict:
+    """
+    Scan ALL historical reports and ensure every cashier with diferencia_interna > 0
+    has a corresponding pending row in cierres_pendientes. Skips ones that
+    already exist (matched by origin_report_id + pos_ref + amount).
+
+    Returns {scanned: N, added: M}.
+    """
+    scanned = 0
+    added = 0
+
+    # Build a set of "signatures" of existing pending diferencia_interna entries
+    existing = set()
+    for p in list_pending(only_open=False):
+        if p["type"] != "diferencia_interna_cierre":
+            continue
+        details = p.get("details", {}) or {}
+        sig = (
+            p["origin_report_id"],
+            details.get("pos_ref", ""),
+            round(p["amount"], 2),
+        )
+        existing.add(sig)
+
+    for h in list_history():
+        rid = h["id"]
+        data = h.get("json_data") or {}
+        report_date = h.get("report_date") or ""
+        for c in (data.get("cashier_breakdown") or []):
+            scanned += 1
+            diff = _safe_float(c.get("diferencia_interna"))
+            if diff <= 0:
+                continue
+            sig = (rid, c.get("pos_ref", ""), round(diff, 2))
+            if sig in existing:
+                continue
+            add_pending(
+                pending_type="diferencia_interna_cierre",
+                amount=diff,
+                origin_report_id=rid,
+                origin_date=report_date,
+                details={
+                    "pos_ref": c.get("pos_ref", ""),
+                    "cashier": c.get("cashier", ""),
+                    "store": c.get("store", ""),
+                    "note": c.get("notes", ""),
+                },
+            )
+            existing.add(sig)
+            added += 1
+
+    return {"scanned": scanned, "added": added}
+
+
+def resolve_pending_manually(pending_id: str, user_email: str, note: str) -> dict:
+    """
+    Mark a single pending as resolved without an attached document
+    (e.g. cashier reposed the missing cash in person).
+    Updates origin report to reflect resolution.
+
+    Returns {"resolved": 1 or 0, "origin_reports_updated": N}
+    """
+    full = list_pending(only_open=False)
+    pending = next((p for p in full if p["id"] == pending_id), None)
+    if not pending:
+        return {"resolved": 0, "origin_reports_updated": 0}
+
+    resolver_label = f"manual-{user_email}"
+    if not mark_pending_resolved(pending_id, resolver_label):
+        return {"resolved": 0, "origin_reports_updated": 0}
+
+    resolved_items = [{
+        "pending_id": pending_id,
+        "pending_type": pending["type"],
+        "original_report_id": pending["origin_report_id"],
+        "amount": pending["amount"],
+        "matched_with": "Resolución manual",
+        "note": note,
+    }]
+    origin_count = apply_resolutions_to_origin_reports(resolved_items)
+    return {"resolved": 1, "origin_reports_updated": origin_count}
 
 
 def resolve_pending_inline(pending_ids: list[str], resolver_report_id: str,
