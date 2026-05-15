@@ -1115,20 +1115,78 @@ def _render_pending_tab(current_user: dict):
     if current_user["role"] == "admin":
         with st.expander("🔧 Utilidades de admin", expanded=False):
             st.caption(
-                "Reindexar todas las diferencias internas de cierres antiguos. "
-                "Útil una sola vez si tienes cierres procesados antes de esta versión "
-                "que tenían diferencias internas no registradas en la bandeja."
+                "**Reparaciones one-time** para limpiar el historial cuando hay reportes "
+                "antiguos con problemas (de versiones anteriores del sistema o por "
+                "alucinaciones de la IA). Estas operaciones son idempotentes: se pueden "
+                "correr múltiples veces sin generar duplicados."
             )
-            if st.button("🔄 Reindexar diferencias internas del historial"):
+
+            st.markdown("**1. Reindexar diferencias internas de cierre**")
+            st.caption(
+                "Busca cajeros que cobraron más efectivo del que depositaron y los agrega "
+                "a la bandeja como pendientes tipo *diferencia interna*. "
+                "Detecta tanto el campo `diferencia_interna` como diferencias calculadas "
+                "de `efectivo - depósito`."
+            )
+            if st.button(
+                "🔄 Reindexar diferencias internas del historial",
+                key="backfill_internal",
+                use_container_width=True,
+            ):
                 try:
                     res = cash_history.backfill_internal_diffs_from_history()
                     st.success(
-                        f"✓ Reindexado: {res['scanned']} cajeros revisados · "
-                        f"{res['added']} pendiente(s) nuevo(s) agregado(s) a la bandeja."
+                        f"✓ Reindexado: {res['scanned']} cajero(s) revisado(s) · "
+                        f"{res['added']} pendiente(s) nuevo(s) agregado(s)."
                     )
                     cash_history.list_pending.clear()
                     import time
                     time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+
+            st.markdown("---")
+            st.markdown("**2. Reparar matches sospechosos del historial**")
+            st.caption(
+                "Detecta y repara matches incorrectos donde la IA juntó depósitos "
+                "con boletas que NO cuadran por monto (diferencia > Q 1.00) o donde "
+                "la misma boleta se usó para dos depósitos. Los depósitos afectados "
+                "se mueven a la bandeja de pendientes para que adjuntes la boleta correcta."
+            )
+            if st.button(
+                "🔍 Reparar matches sospechosos del historial",
+                key="repair_matches",
+                use_container_width=True,
+            ):
+                try:
+                    res = cash_history.repair_suspicious_matches_in_history()
+                    if res["reports_repaired"] == 0:
+                        st.info("✓ No se encontraron matches sospechosos. Todo está limpio.")
+                    else:
+                        st.success(
+                            f"✓ Reparado: {res['reports_repaired']} reporte(s) · "
+                            f"{res['matches_moved']} depósito(s) movidos a pendientes."
+                        )
+                        if res.get("suspicious_slips"):
+                            with st.expander("Boletas marcadas como sospechosas", expanded=True):
+                                st.caption(
+                                    "Estas boletas se usaron incorrectamente en los reportes. "
+                                    "Verifica si las boletas físicas existen realmente."
+                                )
+                                seen = set()
+                                for s in res["suspicious_slips"]:
+                                    sn = s["slip_number"]
+                                    if sn in seen:
+                                        continue
+                                    seen.add(sn)
+                                    st.markdown(
+                                        f"&nbsp;&nbsp;• J No. `{sn}` — razón: {s['reason']}"
+                                    )
+                    cash_history.list_pending.clear()
+                    cash_history.list_history.clear()
+                    import time
+                    time.sleep(2)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: `{e}`")
