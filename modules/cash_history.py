@@ -566,9 +566,15 @@ def find_pending_combinations(target_amount: float, pendings: list[dict],
 
 def backfill_internal_diffs_from_history() -> dict:
     """
-    Scan ALL historical reports and ensure every cashier with diferencia_interna > 0
-    has a corresponding pending row in cierres_pendientes. Skips ones that
-    already exist (matched by origin_report_id + pos_ref + amount).
+    Scan ALL historical reports and ensure every cashier with a real internal
+    diff has a corresponding pending row in cierres_pendientes.
+
+    Detects internal diffs in two ways:
+      1) cashier_breakdown[i].diferencia_interna > 0 (new field, post-fix)
+      2) efectivo - deposito > 0.01 (computed, catches old reports where the
+         AI didn't fill diferencia_interna but the values are visible)
+
+    Skips ones that already exist (matched by origin_report_id + pos_ref + amount).
 
     Returns {scanned: N, added: M}.
     """
@@ -594,7 +600,14 @@ def backfill_internal_diffs_from_history() -> dict:
         report_date = h.get("report_date") or ""
         for c in (data.get("cashier_breakdown") or []):
             scanned += 1
+            # Try field first
             diff = _safe_float(c.get("diferencia_interna"))
+            # Fallback: compute from efectivo - deposito
+            if diff <= 0:
+                efectivo = _safe_float(c.get("efectivo"))
+                deposito = _safe_float(c.get("deposito"))
+                if efectivo > 0 and deposito > 0 and (efectivo - deposito) > 0.01:
+                    diff = round(efectivo - deposito, 2)
             if diff <= 0:
                 continue
             sig = (rid, c.get("pos_ref", ""), round(diff, 2))
@@ -609,13 +622,155 @@ def backfill_internal_diffs_from_history() -> dict:
                     "pos_ref": c.get("pos_ref", ""),
                     "cashier": c.get("cashier", ""),
                     "store": c.get("store", ""),
-                    "note": c.get("notes", ""),
+                    "note": c.get("notes", "") + " [detectado por backfill]",
                 },
             )
             existing.add(sig)
             added += 1
 
     return {"scanned": scanned, "added": added}
+
+
+def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
+    """
+    Scan all historical reports' bank_reconciliation.matched entries and detect:
+      A) Matches where |pos_amount - slip_amount| > tolerance (impossible under
+         the matching rules — indicates Claude hallucinated the pair)
+      B) The same slip_number used for multiple matched entries (violates
+         "one slip = one use" rule)
+
+    For each suspicious match:
+      - Move the POS deposit to missing_slips
+      - Add a pending entry of type deposito_sin_boleta
+      - Mark the report's overall_status as warning if it was ok
+      - Tag a finding noting the auto-repair
+
+    Returns dict with stats.
+    """
+    reports_repaired = 0
+    matches_moved = 0
+    suspicious_slips_seen = []  # informational
+
+    for h in list_history():
+        rid = h["id"]
+        data = h.get("json_data") or {}
+        bank = data.get("bank_reconciliation") or {}
+        matched = list(bank.get("matched") or [])
+        missing = list(bank.get("missing_slips") or [])
+        if not matched:
+            continue
+
+        # Build cashier lookup from cashier_breakdown for enriching missing_slips
+        cbd = {
+            (c.get("pos_ref") or ""): c
+            for c in (data.get("cashier_breakdown") or [])
+        }
+
+        # Detect duplicate slip usage
+        slip_count = {}
+        for m in matched:
+            sn = (m.get("slip_number") or "").strip()
+            if sn:
+                slip_count[sn] = slip_count.get(sn, 0) + 1
+
+        new_matched = []
+        local_moves = []
+        seen_slips = set()
+        for m in matched:
+            pos_amt = _safe_float(m.get("pos_amount"))
+            slip_amt = _safe_float(m.get("slip_amount"))
+            sn = (m.get("slip_number") or "").strip()
+
+            is_high_diff = abs(pos_amt - slip_amt) > tolerance
+            is_duplicate = slip_count.get(sn, 0) > 1 and sn in seen_slips
+            seen_slips.add(sn)
+
+            if is_high_diff or is_duplicate:
+                reason = (
+                    "diferencia de monto > tolerancia"
+                    if is_high_diff else "boleta repetida en matched"
+                )
+                pos_ref = m.get("pos_ref", "")
+                cashier = (cbd.get(pos_ref, {}) or {}).get("cashier", "")
+                local_moves.append({
+                    "pos_ref": pos_ref,
+                    "amount": pos_amt,
+                    "cashier": cashier,
+                    "reason": reason,
+                    "suspicious_slip": sn,
+                })
+                suspicious_slips_seen.append({
+                    "slip_number": sn,
+                    "report_id": rid,
+                    "reason": reason,
+                })
+            else:
+                new_matched.append(m)
+
+        if not local_moves:
+            continue
+
+        # Apply repairs to the report
+        bank["matched"] = new_matched
+        bank["missing_slips"] = missing + [
+            {"pos_ref": x["pos_ref"], "amount": x["amount"], "cashier": x["cashier"]}
+            for x in local_moves
+        ]
+        data["bank_reconciliation"] = bank
+
+        # Append finding
+        findings = data.get("findings") or []
+        findings.append({
+            "severity": "warn",
+            "title": "Conciliación bancaria reparada automáticamente",
+            "detail": (
+                f"Se detectaron {len(local_moves)} match(es) sospechoso(s) y "
+                f"se reclasificaron como depósitos sin boleta. "
+                f"Razones: {', '.join(sorted({x['reason'] for x in local_moves}))}. "
+                f"Las boletas usadas erróneamente quedan listadas para revisión: "
+                f"{', '.join(sorted({x['suspicious_slip'] for x in local_moves}))}."
+            ),
+        })
+        data["findings"] = findings
+
+        # Demote overall_status if previously ok
+        if data.get("overall_status") == "ok":
+            data["overall_status"] = "warning"
+
+        # Save
+        if update_report(rid, data):
+            reports_repaired += 1
+            # Push new missing to pending tray (skip if already exists by signature)
+            existing_pending_sigs = set()
+            for p in list_pending(only_open=False):
+                if p["type"] != "deposito_sin_boleta":
+                    continue
+                d = p.get("details", {}) or {}
+                existing_pending_sigs.add(
+                    (p["origin_report_id"], d.get("pos_ref", ""), round(p["amount"], 2))
+                )
+            for mv in local_moves:
+                sig = (rid, mv["pos_ref"], round(mv["amount"], 2))
+                if sig in existing_pending_sigs:
+                    continue
+                add_pending(
+                    pending_type="deposito_sin_boleta",
+                    amount=mv["amount"],
+                    origin_report_id=rid,
+                    origin_date=h.get("report_date", ""),
+                    details={
+                        "pos_ref": mv["pos_ref"],
+                        "cashier": mv["cashier"],
+                        "note": f"Movido a pendientes por reparación automática ({mv['reason']})",
+                    },
+                )
+                matches_moved += 1
+
+    return {
+        "reports_repaired": reports_repaired,
+        "matches_moved": matches_moved,
+        "suspicious_slips": suspicious_slips_seen,
+    }
 
 
 def resolve_pending_manually(pending_id: str, user_email: str, note: str) -> dict:
