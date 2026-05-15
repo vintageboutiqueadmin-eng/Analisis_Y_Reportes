@@ -645,10 +645,16 @@ def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
       - Mark the report's overall_status as warning if it was ok
       - Tag a finding noting the auto-repair
 
+    ALSO detects fake orphan_slips: if an orphan_slip's amount matches the
+    amount of a moved (hallucinated) match, that orphan is very likely fake
+    (Claude invented it to "balance" the books). It gets removed from both
+    the report and the pending tray.
+
     Returns dict with stats.
     """
     reports_repaired = 0
     matches_moved = 0
+    fake_orphans_removed = 0
     suspicious_slips_seen = []  # informational
 
     for h in list_history():
@@ -657,6 +663,7 @@ def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
         bank = data.get("bank_reconciliation") or {}
         matched = list(bank.get("matched") or [])
         missing = list(bank.get("missing_slips") or [])
+        orphans = list(bank.get("orphan_slips") or [])
         if not matched:
             continue
 
@@ -710,26 +717,50 @@ def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
         if not local_moves:
             continue
 
+        # NEW: detect FAKE orphan_slips. If an orphan_slip's amount matches a
+        # moved (hallucinated) match's pos_amount, it's almost certainly fake.
+        # Claude often invents an orphan to "balance" a wrong match.
+        moved_amounts = [round(m["amount"], 2) for m in local_moves]
+        new_orphans = []
+        removed_orphans = []  # list of (slip_number, amount) tuples
+        for o in orphans:
+            o_amt = round(_safe_float(o.get("amount")), 2)
+            o_sn = (o.get("slip_number") or "").strip()
+            if o_amt in moved_amounts:
+                removed_orphans.append((o_sn, o_amt))
+                moved_amounts.remove(o_amt)  # consume one occurrence
+            else:
+                new_orphans.append(o)
+
         # Apply repairs to the report
         bank["matched"] = new_matched
         bank["missing_slips"] = missing + [
             {"pos_ref": x["pos_ref"], "amount": x["amount"], "cashier": x["cashier"]}
             for x in local_moves
         ]
+        bank["orphan_slips"] = new_orphans
         data["bank_reconciliation"] = bank
 
         # Append finding
         findings = data.get("findings") or []
+        finding_text = (
+            f"Se detectaron {len(local_moves)} match(es) sospechoso(s) y "
+            f"se reclasificaron como depósitos sin boleta. "
+            f"Razones: {', '.join(sorted({x['reason'] for x in local_moves}))}. "
+            f"Boletas usadas erróneamente: "
+            f"{', '.join(sorted({x['suspicious_slip'] for x in local_moves}))}."
+        )
+        if removed_orphans:
+            finding_text += (
+                f" Se removieron también {len(removed_orphans)} boleta(s) "
+                f"huérfana(s) probablemente ficticia(s) "
+                f"(montos coincidían con matches inválidos): "
+                f"{', '.join(sn for sn, _ in removed_orphans)}."
+            )
         findings.append({
             "severity": "warn",
             "title": "Conciliación bancaria reparada automáticamente",
-            "detail": (
-                f"Se detectaron {len(local_moves)} match(es) sospechoso(s) y "
-                f"se reclasificaron como depósitos sin boleta. "
-                f"Razones: {', '.join(sorted({x['reason'] for x in local_moves}))}. "
-                f"Las boletas usadas erróneamente quedan listadas para revisión: "
-                f"{', '.join(sorted({x['suspicious_slip'] for x in local_moves}))}."
-            ),
+            "detail": finding_text,
         })
         data["findings"] = findings
 
@@ -740,6 +771,20 @@ def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
         # Save
         if update_report(rid, data):
             reports_repaired += 1
+
+            # Delete pending entries for the removed fake orphan_slips
+            # Snapshot the pending list first to avoid mid-iteration cache invalidation
+            pending_snapshot = list(list_pending(only_open=True))
+            for sn, _amt in removed_orphans:
+                if not sn:
+                    continue
+                for p in pending_snapshot:
+                    if p["type"] != "boleta_huerfana":
+                        continue
+                    if (p.get("details", {}) or {}).get("slip_number") == sn:
+                        if delete_pending(p["id"]):
+                            fake_orphans_removed += 1
+
             # Push new missing to pending tray (skip if already exists by signature)
             existing_pending_sigs = set()
             for p in list_pending(only_open=False):
@@ -769,6 +814,7 @@ def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
     return {
         "reports_repaired": reports_repaired,
         "matches_moved": matches_moved,
+        "fake_orphans_removed": fake_orphans_removed,
         "suspicious_slips": suspicious_slips_seen,
     }
 
