@@ -220,6 +220,7 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
                     date, is_late_default, idx):
     """Render one employee inside an expander. Returns the record dict."""
     eid = emp["id"]
+    dk = date.isoformat()  # date key suffix — guarantees per-date widget state
     initials = "".join([p[0] for p in emp["name"].split()[:2]]).upper() or "?"
     fg, bg = color_for_name(emp["name"])
     home_store_name = store_labels.get(emp["store_id"], "?")
@@ -228,7 +229,7 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
 
     # Header inside expander — avatar + name + home store + "Apoyo" badge live preview
     # Determine support state for live badge
-    current_worked = st.session_state.get(f"store_{eid}", rec.get("worked_store_id") or emp["store_id"])
+    current_worked = st.session_state.get(f"store_{eid}_{dk}", rec.get("worked_store_id") or emp["store_id"])
     if current_worked not in store_options:
         current_worked = emp["store_id"]
     is_support = (
@@ -270,7 +271,7 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
         index=status_idx,
         horizontal=True,
         label_visibility="collapsed",
-        key=f"status_{eid}",
+        key=f"status_{eid}_{dk}",
     )
 
     st.markdown(
@@ -309,7 +310,7 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
         record["notes"] = st.text_input(
             "📝 Motivo / Nota",
             value=rec.get("notes", ""),
-            key=f"notes_a_{eid}",
+            key=f"notes_a_{eid}_{dk}",
             placeholder=placeholder_map.get(status_choice, ""),
         )
         # Preserve existing worked_store_id for historical traceability
@@ -323,7 +324,7 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
     shift_split = st.toggle(
         "🔀  Trabajo dividido en 2 tiendas",
         value=split_default,
-        key=f"split_{eid}",
+        key=f"split_{eid}_{dk}",
         help="Activa esto si el empleado trabajará una parte del día en una tienda "
              "y otra parte en la otra. Ej. 9:00–14:00 en 7ma y 14:00–19:00 en 6ta.",
     )
@@ -354,17 +355,17 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
             store_options,
             format_func=lambda x: store_labels[x],
             index=s1_store_idx,
-            key=f"store_{eid}",
+            key=f"store_{eid}_{dk}",
         )
         ss_t = c1[1].time_input(
             "🕘 Entrada",
             value=_parse_t(rec.get("shift_start"), d_ss),
-            key=f"ss_{eid}", step=1800,
+            key=f"ss_{eid}_{dk}", step=1800,
         )
         se_t = c1[2].time_input(
             "🕖 Salida",
             value=_parse_t(rec.get("shift_end"), d_se),
-            key=f"se_{eid}", step=1800,
+            key=f"se_{eid}_{dk}", step=1800,
         )
 
         # ===== Segment 2 =====
@@ -387,17 +388,17 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
             store_options,
             format_func=lambda x: store_labels[x],
             index=s2_store_idx,
-            key=f"store2_{eid}",
+            key=f"store2_{eid}_{dk}",
         )
         s2_start_t = c2[1].time_input(
             "🕘 Entrada — Tramo 2",
             value=_parse_t(rec.get("segment2_start"), dt.time(14, 0)),
-            key=f"s2s_{eid}", step=1800,
+            key=f"s2s_{eid}_{dk}", step=1800,
         )
         s2_end_t = c2[2].time_input(
             "🕖 Salida — Tramo 2",
             value=_parse_t(rec.get("segment2_end"), d_se),
-            key=f"s2e_{eid}", step=1800,
+            key=f"s2e_{eid}_{dk}", step=1800,
         )
 
         record["worked_store_id"] = chosen_store_1
@@ -412,17 +413,17 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
             store_options,
             format_func=lambda x: store_labels[x],
             index=s1_store_idx,
-            key=f"store_{eid}",
+            key=f"store_{eid}_{dk}",
         )
         ss_t = c[1].time_input(
             "🕘 Entrada",
             value=_parse_t(rec.get("shift_start"), d_ss),
-            key=f"ss_{eid}", step=1800,
+            key=f"ss_{eid}_{dk}", step=1800,
         )
         se_t = c[2].time_input(
             "🕖 Salida",
             value=_parse_t(rec.get("shift_end"), d_se),
-            key=f"se_{eid}", step=1800,
+            key=f"se_{eid}_{dk}", step=1800,
         )
         record["worked_store_id"] = chosen_store
 
@@ -431,12 +432,12 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
     ls_t = cL[0].time_input(
         "🍽 Almuerzo desde",
         value=_parse_t(rec.get("lunch_start"), d_ls),
-        key=f"ls_{eid}", step=1800,
+        key=f"ls_{eid}_{dk}", step=1800,
     )
     le_t = cL[1].time_input(
         "🍽 Almuerzo hasta",
         value=_parse_t(rec.get("lunch_end"), d_le),
-        key=f"le_{eid}", step=1800,
+        key=f"le_{eid}_{dk}", step=1800,
     )
     if shift_split:
         st.caption(
@@ -447,25 +448,25 @@ def _render_emp_row(emp, rec, has_record, store_options, store_labels,
     ot = cX[0].number_input(
         "⏰ Hora extra (min)", min_value=0, max_value=600, step=15,
         value=int(rec.get("overtime_minutes") or 0),
-        key=f"ot_{eid}",
+        key=f"ot_{eid}_{dk}",
     )
     is_late = cX[1].checkbox(
         "Llegada tarde",
         value=bool(rec.get("is_late", False)),
-        key=f"late_{eid}",
+        key=f"late_{eid}_{dk}",
     )
     actual_start_t = None
     if is_late:
         actual_start_t = cX[2].time_input(
             "Hora real de llegada",
             value=_parse_t(rec.get("actual_start"), ss_t),
-            key=f"actstart_{eid}", step=900,
+            key=f"actstart_{eid}_{dk}", step=900,
         )
 
     notes_val = st.text_input(
         "📝 Notas (opcional)",
         value=rec.get("notes", ""),
-        key=f"notes_w_{eid}",
+        key=f"notes_w_{eid}_{dk}",
         placeholder="Ej. Llegó tarde por tráfico · Cambio de turno por enfermedad de Daisy",
     )
 
