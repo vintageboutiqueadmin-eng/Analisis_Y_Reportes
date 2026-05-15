@@ -690,9 +690,13 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
         if row_type == "boleta_huerfana":
             primary = f"J No. {d.get('slip_number', '?')}"
             secondary = f"Boleta del {d.get('date', '?')}"
-        else:
+        elif row_type == "deposito_sin_boleta":
             primary = d.get("pos_ref", "?")
             secondary = d.get("cashier", "?")
+        else:  # diferencia_interna_cierre
+            primary = f"{d.get('cashier', '?')}"
+            secondary = f"{d.get('pos_ref', '?')} · {d.get('store', '')}"
+
         st.markdown(
             f'<div class="ce-history-row">'
             f'<div class="ce-history-status-dot warning"></div>'
@@ -715,18 +719,89 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
                     st.success("Eliminado")
                     st.rerun()
 
-    # Inline "Adjuntar" expander (only admin + viewer can resolve)
+    # Inline resolution flow (only admin + viewer can resolve)
     if current_user["role"] not in ("admin", "viewer"):
         return
 
-    label = (
-        "📎 Adjuntar PDF de cierre del POS para resolver"
-        if row_type == "boleta_huerfana"
-        else "📎 Adjuntar boleta del banco para resolver"
+    if row_type == "diferencia_interna_cierre":
+        # Two options: attach slip OR manual mark as repaid
+        with st.expander("📎 Resolver este faltante", expanded=False):
+            _render_internal_diff_resolver(p, current_user)
+    else:
+        label = (
+            "📎 Adjuntar PDF de cierre del POS para resolver"
+            if row_type == "boleta_huerfana"
+            else "📎 Adjuntar boleta del banco para resolver"
+        )
+        with st.expander(label, expanded=False):
+            _render_inline_resolver(p, row_type, all_open_same_type, current_user)
+
+
+def _render_internal_diff_resolver(p: dict, current_user: dict) -> None:
+    """Resolver for diferencia_interna_cierre — two paths: manual or boleta."""
+    d = p.get("details", {})
+
+    st.markdown(
+        f"<div style='background:#FAFBFC;border:1px solid #E8EBF0;border-radius:4px;"
+        f"padding:12px 16px;margin:6px 0 14px;font-size:12.5px;line-height:1.6;color:#3D4554;'>"
+        f"<strong>{d.get('cashier','?')}</strong> debe reponer "
+        f"<strong style='color:#B91C1C;'>{_fmt_q(p['amount'])}</strong> del cierre "
+        f"<code>{d.get('pos_ref','?')}</code>."
+        f"</div>",
+        unsafe_allow_html=True,
     )
 
-    with st.expander(label, expanded=False):
-        _render_inline_resolver(p, row_type, all_open_same_type, current_user)
+    st.markdown(
+        "<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
+        "color:#0B0F19;font-weight:700;margin-bottom:8px;'>"
+        "Opción 1: Repuesto en efectivo (sin boleta)</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Usa esta opción si el cajero entregó el efectivo directamente al Lic.")
+    note = st.text_input(
+        "Nota (opcional, ej. fecha en que entregó el efectivo)",
+        placeholder="Ej. Daisy entregó Q 0.50 al Lic. el 15/05/2026",
+        key=f"manual_note_{p['id']}",
+    )
+    if st.button(
+        "✓ Marcar como repuesto manualmente",
+        key=f"manual_resolve_{p['id']}",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            result = cash_history.resolve_pending_manually(
+                pending_id=p["id"],
+                user_email=current_user["email"],
+                note=note or "Repuesto en efectivo (resolución manual)",
+            )
+            if result["resolved"]:
+                st.success(
+                    f"✅ Pendiente resuelto · "
+                    f"{result['origin_reports_updated']} cierre(s) actualizado(s). "
+                    f"La página se recargará."
+                )
+                st.balloons()
+                cash_history.list_pending.clear()
+                cash_history.list_history.clear()
+                import time
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("No se pudo resolver. Recarga la página.")
+        except Exception as e:
+            st.error(f"Error: `{e}`")
+
+    st.markdown(
+        "<div style='margin:18px 0 8px;font-size:11px;letter-spacing:2px;"
+        "text-transform:uppercase;color:#0B0F19;font-weight:700;'>"
+        "Opción 2: Boleta de depósito por la diferencia</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Usa esta opción si el cajero depositó la diferencia al banco con una boleta aparte.")
+
+    # Reuse the standard slip resolver — same flow as deposito_sin_boleta
+    _render_inline_resolver(p, "deposito_sin_boleta", [p], current_user)
 
 
 def _render_inline_resolver(p: dict, row_type: str,
@@ -1027,18 +1102,42 @@ def _render_pending_tab(current_user: dict):
     st.markdown(
         "<div style='font-size:12px;color:#3D4554;line-height:1.6;margin-bottom:14px;'>"
         "<strong>Bandeja de pendientes:</strong> aquí quedan boletas de banco sin "
-        "depósito correspondiente, y depósitos del POS sin boleta de banco. "
+        "depósito correspondiente, depósitos del POS sin boleta de banco, y "
+        "<strong>faltantes internos de caja</strong> (efectivo que el cajero debe reponer). "
         "<strong>La próxima vez que ejecutes un análisis</strong>, la IA intentará "
         "automáticamente cuadrarlos con los nuevos archivos que subas (por monto)."
         "</div>",
         unsafe_allow_html=True,
     )
 
+    # Admin utility: backfill internal diffs from history (for old reports
+    # that were processed before this feature existed)
+    if current_user["role"] == "admin":
+        with st.expander("🔧 Utilidades de admin", expanded=False):
+            st.caption(
+                "Reindexar todas las diferencias internas de cierres antiguos. "
+                "Útil una sola vez si tienes cierres procesados antes de esta versión "
+                "que tenían diferencias internas no registradas en la bandeja."
+            )
+            if st.button("🔄 Reindexar diferencias internas del historial"):
+                try:
+                    res = cash_history.backfill_internal_diffs_from_history()
+                    st.success(
+                        f"✓ Reindexado: {res['scanned']} cajeros revisados · "
+                        f"{res['added']} pendiente(s) nuevo(s) agregado(s) a la bandeja."
+                    )
+                    cash_history.list_pending.clear()
+                    import time
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+
     if not pending:
         st.markdown(
             '<div class="ce-empty">'
             '<strong>✓ Bandeja vacía</strong>'
-            'No hay pendientes pendientes — todos los cierres están cuadrados.'
+            'No hay pendientes — todos los cierres están cuadrados.'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -1052,8 +1151,13 @@ def _render_pending_tab(current_user: dict):
             if not resolved_only:
                 st.caption("Aún no hay resoluciones registradas.")
             else:
+                type_labels = {
+                    "boleta_huerfana": "Boleta huérfana",
+                    "deposito_sin_boleta": "Depósito sin boleta",
+                    "diferencia_interna_cierre": "Diferencia interna",
+                }
                 for p in resolved_only[:30]:
-                    ptype = "Boleta huérfana" if p["type"] == "boleta_huerfana" else "Depósito sin boleta"
+                    ptype = type_labels.get(p["type"], p["type"])
                     st.markdown(
                         f"&nbsp;&nbsp;✓ **{ptype}** — {_fmt_q(p['amount'])} · "
                         f"de `{p['origin_report_id']}` → resuelto en "
@@ -1064,31 +1168,39 @@ def _render_pending_tab(current_user: dict):
     # Separate by type
     boletas_huerfanas = [p for p in pending if p["type"] == "boleta_huerfana"]
     depositos_sin_boleta = [p for p in pending if p["type"] == "deposito_sin_boleta"]
+    diferencias_internas = [p for p in pending if p["type"] == "diferencia_interna_cierre"]
 
     total_boletas = sum(p["amount"] for p in boletas_huerfanas)
     total_depositos = sum(p["amount"] for p in depositos_sin_boleta)
+    total_internas = sum(p["amount"] for p in diferencias_internas)
 
-    # KPI mini cards
+    # KPI cards: 4 columns now
     st.markdown(
-        f'<div class="ce-kpi-grid" style="grid-template-columns:repeat(3,1fr);">'
+        f'<div class="ce-kpi-grid" style="grid-template-columns:repeat(4,1fr);">'
         f'<div class="ce-kpi">'
         f'<div class="ce-kpi-label">🧾 Boletas huérfanas</div>'
         f'<div class="ce-kpi-value">{_fmt_q(total_boletas)}</div>'
-        f'<div class="ce-kpi-detail">{len(boletas_huerfanas)} boleta(s) sin depósito</div>'
+        f'<div class="ce-kpi-detail">{len(boletas_huerfanas)} sin depósito</div>'
         f'</div>'
 
         f'<div class="ce-kpi">'
         f'<div class="ce-kpi-label">📤 Depósitos sin boleta</div>'
         f'<div class="ce-kpi-value">{_fmt_q(total_depositos)}</div>'
-        f'<div class="ce-kpi-detail">{len(depositos_sin_boleta)} depósito(s) sin comprobante</div>'
+        f'<div class="ce-kpi-detail">{len(depositos_sin_boleta)} sin comprobante</div>'
+        f'</div>'
+
+        f'<div class="ce-kpi">'
+        f'<div class="ce-kpi-label">⚖️ Diferencias internas</div>'
+        f'<div class="ce-kpi-value">{_fmt_q(total_internas)}</div>'
+        f'<div class="ce-kpi-detail">{len(diferencias_internas)} faltante(s) de caja</div>'
         f'</div>'
 
         f'<div class="ce-kpi">'
         f'<div class="ce-kpi-label">Diferencia neta</div>'
-        f'<div class="ce-kpi-value" style="color:{"#B91C1C" if total_boletas != total_depositos else "#1B7340"};">'
-        f'{_fmt_q(abs(total_depositos - total_boletas))}</div>'
+        f'<div class="ce-kpi-value" style="color:{"#B91C1C" if (total_boletas != total_depositos or total_internas > 0) else "#1B7340"};">'
+        f'{_fmt_q(abs(total_depositos - total_boletas) + total_internas)}</div>'
         f'<div class="ce-kpi-detail">'
-        f'{"Si cuadraran perfecto, sería Q 0.00" if total_boletas != total_depositos else "✓ Cuadran"}'
+        f'{"Pendiente por cuadrar" if (total_boletas != total_depositos or total_internas > 0) else "✓ Cuadran"}'
         f'</div></div>'
         f'</div>',
         unsafe_allow_html=True,
@@ -1130,6 +1242,26 @@ def _render_pending_tab(current_user: dict):
                 p, current_user,
                 row_type="deposito_sin_boleta",
                 all_open_same_type=depositos_sin_boleta,
+            )
+
+    # Diferencias internas de cierre (faltante físico de caja)
+    if diferencias_internas:
+        st.markdown(
+            "<div style='margin:18px 0 10px;font-size:11px;letter-spacing:2px;"
+            "text-transform:uppercase;color:#0B0F19;font-weight:700;'>"
+            f"⚖️ Diferencias internas de cierre ({len(diferencias_internas)})</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "🧮 Estos son cierres donde el efectivo cobrado fue mayor al depósito realizado — "
+            "el cajero debe **reponer la diferencia**. Cuando reponga, marca como repuesto manualmente "
+            "(si entregó el efectivo al Lic.) o adjunta la boleta si lo depositó al banco aparte."
+        )
+        for p in diferencias_internas:
+            _render_pending_row(
+                p, current_user,
+                row_type="diferencia_interna_cierre",
+                all_open_same_type=diferencias_internas,
             )
 
 
