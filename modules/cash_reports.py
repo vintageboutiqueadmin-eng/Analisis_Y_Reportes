@@ -486,19 +486,31 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
 
 ## Reglas críticas de la conciliación
 
+**⚠️ REGLA #0 — ANTI-ALUCINACIÓN (la más importante).** Solo trabaja con datos que LITERALMENTE puedes leer en los documentos que te entregamos. PROHIBIDO inventar:
+   - Números de boleta (`J No.`) que no aparezcan claramente impresos en alguna foto/PDF de boleta.
+   - Números POS/AAAA/MM/DD/NNNN que no estén en algún PDF.
+   - Lotes de NEONET/Credomatic que no estén en algún ticket.
+   - Si no puedes leer un campo con claridad, repórtalo en `findings` como warning. NUNCA inventes el dato. Mejor reportar "no se pudo leer el J No. de una boleta" que asumir uno.
+   - Cada documento que listes en `orphan_slips`, `matched`, etc. DEBE corresponder a un archivo REAL que recibiste.
+
+**⚠️ REGLA #0.5 — UNA BOLETA SE USA UNA SOLA VEZ.** Cada `J No.` único puede aparecer SOLO UNA VEZ en `matched` (haciendo pareja con UN solo `pos_ref`). Si la misma boleta parece cuadrar con dos depósitos diferentes, escoge la mejor coincidencia (más exacta por monto) y deja el otro depósito en `missing_slips`. Lo mismo aplica a PDFs (un POS ref no puede aparecer dos veces) y tickets (un lote no puede aparecer dos veces).
+
 **REGLA #1 — Ignora completamente las fechas para hacer matching.** El depósito de un cierre puede hacerse al día siguiente, dos días después, o el lunes para cierres del fin de semana. Lo que importa es que los montos cuadren. Tolerancia de Q 1.00.
 
 **REGLA #2 — Detección de duplicados contra historial.** Te paso un catálogo con los IDs de documentos ya procesados (pos_refs, bank_slip_numbers, neonet_lotes). Si en los archivos de HOY encuentras:
    - Un PDF cuyo POS ref ya está en el catálogo → es duplicado del cierre anterior. **EXCLÚYELO totalmente del cálculo de totales** (no sumes sus montos) y repórtalo como finding rojo indicando en cuál cierre histórico está.
    - Una boleta cuyo J No. ya está en el catálogo → mismo trato: excluir del cálculo, reportar.
-   - Un ticket NEONET/Credomatic cuyo lote ya está en el catálogo → mismo trato.
+   - Un ticket NEONET/Credomatic cuyo lote ya está en el catálogo → mismo trato: excluir del cálculo, reportar.
 
-**REGLA #3 — Matching con la bandeja de pendientes.** Te paso una lista de pendientes acumulados de análisis anteriores. Cada pendiente tiene: tipo (boleta_huerfana o deposito_sin_boleta), monto, ID del cierre histórico de origen, y datos adicionales.
+**REGLA #3 — Matching con la bandeja de pendientes.** Te paso una lista de pendientes acumulados de análisis anteriores. Cada pendiente tiene: tipo (`boleta_huerfana`, `deposito_sin_boleta`, o `diferencia_interna_cierre`), monto, ID del cierre histórico de origen, y datos adicionales.
    - Para cada **boleta huérfana** en pendientes: trata de hacer match con depósitos sin boleta de los PDFs de HOY. Si cuadran por monto (±Q 1.00), se resuelve.
    - Para cada **depósito sin boleta** en pendientes: trata de hacer match con boletas que recibes HOY. Si cuadran, se resuelve.
+   - Para cada **diferencia interna**: si recibes una boleta cuyo monto es igual a esa diferencia, también puede resolverse.
    - Reporta cada match resuelto en el campo `resolved_pending` del JSON.
 
-**REGLA #4 — Detección de duplicados internos.** Si dos PDFs del MISMO upload tienen el mismo POS ref, o dos boletas tienen el mismo J No., trátalo igual: solo cuenta una vez, reporta el duplicado.
+**REGLA #4 — Detección de duplicados internos del upload actual.** Si dos PDFs del MISMO upload tienen el mismo POS ref, o dos boletas tienen el mismo J No., o dos tickets tienen el mismo procesador+lote, trátalo igual: solo cuenta una vez, reporta el duplicado.
+
+**REGLA #5 — Diferencias internas de PDF deben reportarse SIEMPRE.** Si un PDF muestra "Diferencia: Q X.XX" donde X > 0 (efectivo cobrado ≠ depósito realizado), reporta `diferencia_interna: X.XX` en el `cashier_breakdown` correspondiente. Estas diferencias representan dinero que el cajero debe reponer.
 
 ## Tu análisis debe producir
 
