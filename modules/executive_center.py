@@ -1164,10 +1164,13 @@ def _render_pending_tab(current_user: dict):
                     if res["reports_repaired"] == 0:
                         st.info("✓ No se encontraron matches sospechosos. Todo está limpio.")
                     else:
-                        st.success(
+                        msg = (
                             f"✓ Reparado: {res['reports_repaired']} reporte(s) · "
-                            f"{res['matches_moved']} depósito(s) movidos a pendientes."
+                            f"{res['matches_moved']} depósito(s) movidos a pendientes"
                         )
+                        if res.get("fake_orphans_removed", 0) > 0:
+                            msg += f" · {res['fake_orphans_removed']} boleta(s) ficticia(s) eliminada(s)"
+                        st.success(msg + ".")
                         if res.get("suspicious_slips"):
                             with st.expander("Boletas marcadas como sospechosas", expanded=True):
                                 st.caption(
