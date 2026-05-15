@@ -712,9 +712,9 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
             unsafe_allow_html=True,
         )
     with col_action:
-        if current_user["role"] == "admin":
+        if current_user["role"] in ("admin", "viewer"):
             if st.button("🗑", key=f"del_pend_{p['id']}",
-                         help="Eliminar este pendiente"):
+                         help="Eliminar este pendiente (úsalo si sabes que ya no aplica)"):
                 if cash_history.delete_pending(p["id"]):
                     st.success("Eliminado")
                     st.rerun()
@@ -1110,10 +1110,9 @@ def _render_pending_tab(current_user: dict):
         unsafe_allow_html=True,
     )
 
-    # Admin utility: backfill internal diffs from history (for old reports
-    # that were processed before this feature existed)
-    if current_user["role"] == "admin":
-        with st.expander("🔧 Utilidades de admin", expanded=False):
+    # Utilities: reparations available to admin AND viewer (Lic. lleva el proceso)
+    if current_user["role"] in ("admin", "viewer"):
+        with st.expander("🔧 Utilidades de reparación", expanded=False):
             st.caption(
                 "**Reparaciones one-time** para limpiar el historial cuando hay reportes "
                 "antiguos con problemas (de versiones anteriores del sistema o por "
