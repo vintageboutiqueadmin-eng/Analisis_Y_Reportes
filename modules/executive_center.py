@@ -807,39 +807,33 @@ def _render_internal_diff_resolver(p: dict, current_user: dict) -> None:
 def _render_inline_resolver(p: dict, row_type: str,
                               all_open_same_type: list[dict],
                               current_user: dict) -> None:
-    """The actual upload + analyze + resolve flow inside the expander."""
+    """
+    Versatile inline resolver:
+      - Accepts any visual format (PDF, JPG, PNG, WEBP, HEIC)
+      - Auto-detects whether the file is a boleta or POS-closing PDF
+      - Searches the ENTIRE pending tray (all types) for matches by amount
+      - Resolves cross-type when both sides exist (boleta huérfana + depósito sin boleta)
+    """
     file_key = f"resolve_upload_{p['id']}"
     extract_state_key = f"resolve_extract_{p['id']}"
 
-    # Step 1: file upload
-    if row_type == "boleta_huerfana":
-        uploaded = st.file_uploader(
-            "Subir PDF del cierre del POS correspondiente",
-            type=["pdf"],
-            key=file_key,
-            label_visibility="collapsed",
-        )
-        help_text = (
-            "Sube el PDF del cierre de caja del POS cuyo depósito generó esta boleta."
-        )
-    else:
-        uploaded = st.file_uploader(
-            "Subir boleta del banco (foto o PDF)",
-            type=["jpg", "jpeg", "png", "webp", "pdf"],
-            key=file_key,
-            label_visibility="collapsed",
-        )
-        help_text = (
-            "Sube la foto o PDF de la boleta de banco que respalda este depósito."
-        )
-    st.caption(help_text)
+    uploaded = st.file_uploader(
+        "Subir documento (boleta de banco o PDF de cierre)",
+        type=["pdf", "jpg", "jpeg", "png", "webp", "heic"],
+        key=file_key,
+        label_visibility="collapsed",
+    )
+    st.caption(
+        "📎 Sube cualquier documento relacionado: foto/PDF de la boleta del banco, "
+        "o PDF de cierre del POS. La app detecta automáticamente qué es y busca "
+        "matches en toda la bandeja de pendientes."
+    )
 
     if not uploaded:
-        # Clear any previous extract state
         st.session_state.pop(extract_state_key, None)
         return
 
-    # Step 2: read & extract (only once per upload)
+    # Extract (only once per upload)
     extract = st.session_state.get(extract_state_key)
     if extract is None or extract.get("filename") != uploaded.name:
         with st.spinner("🔬 Leyendo el documento..."):
@@ -847,58 +841,77 @@ def _render_inline_resolver(p: dict, row_type: str,
                 uploaded.seek(0)
                 file_bytes = uploaded.read()
                 mime = uploaded.type or ""
-                if row_type == "boleta_huerfana":
-                    data = cash_reports.extract_pdf_data(file_bytes, uploaded.name)
-                    extract = {
-                        "kind": "pdf",
-                        "filename": uploaded.name,
-                        "ref": data.get("pos_ref", ""),
-                        "amount": float(data.get("deposito") or 0),
-                        "extra": {
-                            "store": data.get("store", ""),
-                            "cashier": data.get("cashier", ""),
-                            "credomatic": data.get("credomatic", 0),
-                            "visanet": data.get("visanet", 0),
-                            "efectivo": data.get("efectivo", 0),
-                        },
-                        "confidence": data.get("confidence", "medium"),
-                    }
-                else:
-                    data = cash_reports.extract_slip_data(file_bytes, mime, uploaded.name)
+                data = cash_reports.extract_auto(file_bytes, mime, uploaded.name)
+                doc_type = data.get("document_type", "otro")
+                if doc_type == "boleta":
                     extract = {
                         "kind": "slip",
                         "filename": uploaded.name,
                         "ref": str(data.get("slip_number", "")),
                         "amount": float(data.get("amount") or 0),
-                        "extra": {
-                            "date": data.get("date", ""),
-                            "is_reprint": data.get("is_reprint", False),
-                        },
+                        "date": data.get("date", ""),
                         "confidence": data.get("confidence", "medium"),
+                    }
+                elif doc_type == "pdf_cierre":
+                    extract = {
+                        "kind": "pdf",
+                        "filename": uploaded.name,
+                        "ref": str(data.get("pos_ref", "")),
+                        "amount": float(data.get("amount") or 0),
+                        "cashier": data.get("cashier", ""),
+                        "store": data.get("store", ""),
+                        "confidence": data.get("confidence", "medium"),
+                    }
+                else:
+                    extract = {
+                        "kind": "unknown",
+                        "filename": uploaded.name,
+                        "ref": "",
+                        "amount": 0,
+                        "confidence": "low",
                     }
                 st.session_state[extract_state_key] = extract
             except Exception as e:
                 st.error(f"No se pudo leer el documento: `{e}`")
                 return
 
-    # Step 3: validate & show results
+    # Unknown document type
+    if extract["kind"] == "unknown":
+        st.error(
+            "🚫 **No se reconoció el documento.** Esperábamos una boleta de banco o un "
+            "PDF de cierre del POS. Verifica que la imagen sea legible y que sea el "
+            "documento correcto."
+        )
+        return
+
+    # Show extracted data
     ref = extract["ref"]
     amount = extract["amount"]
     confidence = extract.get("confidence", "medium")
-
-    # Show what we extracted
     cfg_color = {"high": "#1B7340", "medium": "#D97706", "low": "#B91C1C"}.get(confidence, "#6C7280")
-    ref_label = "POS ref" if extract["kind"] == "pdf" else "J No."
+    type_label = "📤 Boleta de banco" if extract["kind"] == "slip" else "📄 PDF de cierre del POS"
+    ref_label = "J No." if extract["kind"] == "slip" else "POS ref"
+
+    extra_info = ""
+    if extract["kind"] == "pdf":
+        if extract.get("cashier"):
+            extra_info = f"  ·  <strong>Cajero:</strong> {extract['cashier']}"
+        if extract.get("store"):
+            extra_info += f"  ·  <strong>Tienda:</strong> {extract['store']}"
+    elif extract.get("date"):
+        extra_info = f"  ·  <strong>Fecha:</strong> {extract['date']}"
+
     st.markdown(
         f"<div style='background:#FAFBFC;border:1px solid #E8EBF0;border-radius:4px;"
         f"padding:12px 16px;margin:10px 0;'>"
         f"<div style='font-size:10px;letter-spacing:2px;text-transform:uppercase;"
         f"color:#6C7280;font-weight:600;margin-bottom:6px;'>"
-        f"Datos extraídos</div>"
+        f"Datos extraídos · {type_label}</div>"
         f"<div style='font-size:13px;color:#0B0F19;line-height:1.6;'>"
         f"<strong>{ref_label}:</strong> <code>{ref or '(no detectado)'}</code>  ·  "
         f"<strong>Monto:</strong> {_fmt_q(amount)}  ·  "
         f"<strong>Confianza:</strong> <span style='color:{cfg_color};'>{confidence}</span>"
+        f"{extra_info}"
         f"</div></div>",
         unsafe_allow_html=True,
     )
@@ -906,11 +919,12 @@ def _render_inline_resolver(p: dict, row_type: str,
     if not ref:
         st.warning(
             "⚠ No se pudo extraer el identificador del documento. "
-            "Verifica que la foto sea legible o usa un PDF más claro."
+            "Verifica que la imagen sea legible. Si la confianza es baja, "
+            "puedes intentar con una foto más clara."
         )
         return
 
-    # Duplicate check
+    # Duplicate check against history
     if extract["kind"] == "slip":
         exists, where = cash_history.slip_number_exists_in_history(ref)
     else:
@@ -922,116 +936,193 @@ def _render_inline_resolver(p: dict, row_type: str,
         )
         return
 
-    # Combination detection: find combos of pendings that sum to this amount
-    open_pendings = [pp for pp in all_open_same_type if pp["id"] != p["id"]] + [p]
-    # Note: we treat p as "must include"; we want combos that include p OR combos that include other pendings
-    # Strategy: find ALL combos that sum to amount; later prioritize ones that include p
+    # ========================================================================
+    # SEARCH FOR MATCHES ACROSS THE ENTIRE PENDING TRAY (versatile mode)
+    # ========================================================================
+    # The uploaded doc can match pendings of any type that complement it:
+    #   - Uploaded a boleta? It matches deposito_sin_boleta or diferencia_interna
+    #   - Uploaded a pdf_cierre? It matches boleta_huerfana (its deposit total)
+    try:
+        all_pending = cash_history.list_pending(only_open=True)
+    except Exception as e:
+        st.error(f"No se pudo leer la bandeja: `{e}`")
+        return
 
-    combos = cash_history.find_pending_combinations(amount, open_pendings, tolerance=1.0, max_size=3)
+    if extract["kind"] == "slip":
+        # Boletas resolve depósitos sin boleta and diferencias internas
+        candidates = [
+            x for x in all_pending
+            if x["type"] in ("deposito_sin_boleta", "diferencia_interna_cierre")
+        ]
+    else:
+        # PDFs resolve boletas huérfanas
+        candidates = [
+            x for x in all_pending if x["type"] == "boleta_huerfana"
+        ]
 
-    # Filter combos to those including this row's pending OR show all if same amount
-    combos_with_p = [c for c in combos if any(x["id"] == p["id"] for x in c)]
+    # Find combinations whose sum matches the uploaded amount
+    combos = cash_history.find_pending_combinations(
+        amount, candidates, tolerance=1.0, max_size=3
+    )
 
-    # ===== Decision: exact, partial, excess, or multi-pending =====
-    diff = amount - p["amount"]
+    # ========================================================================
+    # CASE A: No candidates of complementary type at all
+    # ========================================================================
+    if not candidates:
+        st.warning(
+            "⚠ No hay pendientes en la bandeja que puedan cuadrar con este documento. "
+            "Quizás ya están todos resueltos. Si crees que este documento corresponde a un "
+            "nuevo cierre, súbelo desde **Cierres de Caja** en lugar de aquí."
+        )
+        return
 
-    if abs(diff) <= 1.0 and (not combos_with_p or len(combos_with_p[0]) == 1):
-        # Exact single match
-        st.success(
-            f"✅ **Cuadra exactamente** con este pendiente "
-            f"({_fmt_q(amount)} = {_fmt_q(p['amount'])})."
+    # ========================================================================
+    # CASE B: One or more combinations found
+    # ========================================================================
+    if combos:
+        # Highlight combos that include p (the pending the user is currently viewing)
+        combos_including_p = [c for c in combos if any(x["id"] == p["id"] for x in c)]
+        combos_other = [c for c in combos if not any(x["id"] == p["id"] for x in c)]
+
+        if combos_including_p:
+            st.success(
+                f"✅ **Encontramos una coincidencia que incluye este pendiente.** "
+                f"Confirma cuál aplicar:"
+            )
+            for idx, combo in enumerate(combos_including_p[:5]):
+                _render_combo_choice(combo, amount, ref, extract['filename'], idx, p, "p")
+
+        if combos_other:
+            st.info(
+                f"🔗 **También hay otras coincidencias por monto en la bandeja.** "
+                f"Si crees que el documento que subiste corresponde a uno de estos, puedes resolverlos:"
+            )
+            for idx, combo in enumerate(combos_other[:5]):
+                _render_combo_choice(combo, amount, ref, extract['filename'], idx, p, "other")
+        return
+
+    # ========================================================================
+    # CASE C: No combinations matched exactly — show closest options
+    # ========================================================================
+    # Find single pendings close in amount (partial or excess scenarios)
+    if extract["kind"] == "slip":
+        # Slip with no combo → could be partial payment of one pending or excess
+        # Show the pending p (the one user opened) as the primary partial/excess option
+        diff = amount - p["amount"]
+        if abs(diff) <= 1.0:
+            # Exact (shouldn't reach here since combos would catch it, but defensive)
+            st.success(
+                f"✅ **Cuadra con este pendiente** ({_fmt_q(amount)} ≈ {_fmt_q(p['amount'])})."
+            )
+            if st.button(
+                "Resolver pendiente",
+                key=f"resolve_exact_{p['id']}",
+                type="primary",
+                use_container_width=True,
+            ):
+                _do_resolve_pendings(
+                    [p],
+                    resolver_label=f"inline-{ref}",
+                    slip_or_pdf_id=ref,
+                    amount=amount,
+                    note=f"Resuelto inline subiendo {extract['filename']}",
+                )
+            return
+        elif diff < -1.0:
+            # Partial payment
+            falt = abs(diff)
+            st.warning(
+                f"⚠ **Pago parcial.** El pendiente que abriste es de "
+                f"{_fmt_q(p['amount'])} pero el documento es de {_fmt_q(amount)}. "
+                f"Faltan **{_fmt_q(falt)}**.\n\n"
+                f"Al resolver, marcaremos este pendiente como cubierto y crearemos un nuevo "
+                f"pendiente de {_fmt_q(falt)} para cuando suban el complemento."
+            )
+            if st.button(
+                f"Aceptar pago parcial y crear pendiente por {_fmt_q(falt)}",
+                key=f"resolve_partial_{p['id']}",
+                type="primary",
+                use_container_width=True,
+            ):
+                _do_resolve_pendings_partial(
+                    p,
+                    resolver_label=f"inline-{ref}",
+                    slip_or_pdf_id=ref,
+                    amount=amount,
+                    remainder=falt,
+                    note=f"Pago parcial inline subiendo {extract['filename']}",
+                )
+            return
+        else:
+            # Excess
+            excess = diff
+            st.error(
+                f"🚨 **Excedente sospechoso.** El pendiente que abriste es de "
+                f"{_fmt_q(p['amount'])} pero el documento es de {_fmt_q(amount)}. "
+                f"Sobran **{_fmt_q(excess)}**.\n\n"
+                f"Esta diferencia no se resuelve automáticamente. Posibles causas:\n"
+                f"- El documento cubre **más de un pendiente** — pero ninguna combinación cuadra\n"
+                f"- El monto se ingresó mal en algún lado\n"
+                f"- Hay un depósito adicional que aún no se ha registrado\n\n"
+                f"Revisa manualmente antes de continuar."
+            )
+            return
+
+    # Kind == pdf, no combos
+    st.warning(
+        f"⚠ Ningún pendiente cuadra exactamente con este monto ({_fmt_q(amount)}). "
+        f"Quizás el documento corresponde a un cierre nuevo. En ese caso, súbelo "
+        f"desde **Cierres de Caja**."
+    )
+
+
+def _render_combo_choice(combo: list[dict], amount: float, ref: str,
+                          filename: str, idx: int, p: dict, suffix: str) -> None:
+    """Render one combination as a clickable card with a resolve button."""
+    ids_in_combo = [x["id"] for x in combo]
+    total = sum(x["amount"] for x in combo)
+    descs = []
+    type_emoji = {
+        "boleta_huerfana": "🧾",
+        "deposito_sin_boleta": "📤",
+        "diferencia_interna_cierre": "⚖️",
+    }
+    for x in combo:
+        xd = x.get("details", {})
+        emoji = type_emoji.get(x["type"], "•")
+        if x["type"] == "boleta_huerfana":
+            descs.append(f"{emoji} J No. {xd.get('slip_number','?')} ({_fmt_q(x['amount'])})")
+        elif x["type"] == "deposito_sin_boleta":
+            descs.append(
+                f"{emoji} {xd.get('pos_ref','?')} · {xd.get('cashier','?')} ({_fmt_q(x['amount'])})"
+            )
+        else:  # diferencia_interna_cierre
+            descs.append(
+                f"{emoji} {xd.get('cashier','?')} ({xd.get('pos_ref','?')}) · "
+                f"diferencia {_fmt_q(x['amount'])}"
+            )
+
+    with st.container(border=True):
+        st.markdown(
+            f"<div style='font-size:12.5px;color:#0B0F19;line-height:1.6;'>"
+            f"<strong>Combinación {idx+1}:</strong><br>{'<br>'.join(descs)}<br>"
+            f"<span style='color:#6C7280;'>Suma total: {_fmt_q(total)}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
         )
         if st.button(
-            "Resolver pendiente",
-            key=f"resolve_btn_{p['id']}",
+            f"✓ Resolver con esta combinación ({len(combo)} pendiente(s))",
+            key=f"resolve_combo_{p['id']}_{suffix}_{idx}",
             type="primary",
             use_container_width=True,
         ):
             _do_resolve_pendings(
-                [p],
+                combo,
                 resolver_label=f"inline-{ref}",
                 slip_or_pdf_id=ref,
                 amount=amount,
-                note=f"Resuelto inline subiendo {extract['filename']}",
+                note=f"Resuelto inline con {filename} (combinación de {len(combo)})",
             )
-
-    elif len(combos_with_p) > 1 or (combos_with_p and len(combos_with_p[0]) > 1):
-        # Multiple pendings can be resolved with this document
-        st.info(
-            f"🧮 **Esta {('boleta' if extract['kind']=='slip' else 'cierre')} de {_fmt_q(amount)} "
-            f"podría cubrir múltiples pendientes.** Elige la combinación correcta:"
-        )
-        for idx, combo in enumerate(combos_with_p[:5]):
-            ids_in_combo = [x["id"] for x in combo]
-            total = sum(x["amount"] for x in combo)
-            descs = []
-            for x in combo:
-                xd = x.get("details", {})
-                if x["type"] == "boleta_huerfana":
-                    descs.append(f"J No. {xd.get('slip_number','?')} ({_fmt_q(x['amount'])})")
-                else:
-                    descs.append(f"{xd.get('pos_ref','?')} · {xd.get('cashier','?')} ({_fmt_q(x['amount'])})")
-            with st.container(border=True):
-                st.markdown(
-                    f"<div style='font-size:12.5px;color:#0B0F19;line-height:1.6;'>"
-                    f"<strong>Combinación {idx+1}:</strong> {' + '.join(descs)}<br>"
-                    f"<span style='color:#6C7280;'>Total: {_fmt_q(total)}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    f"Resolver con esta combinación",
-                    key=f"resolve_combo_{p['id']}_{idx}",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    _do_resolve_pendings(
-                        combo,
-                        resolver_label=f"inline-{ref}",
-                        slip_or_pdf_id=ref,
-                        amount=amount,
-                        note=f"Resuelto inline con combinación: {', '.join(ids_in_combo)}",
-                    )
-
-    elif diff < -1.0:
-        # Faltante: monto del documento es menor que el pendiente → resolución parcial
-        falt = abs(diff)
-        st.warning(
-            f"⚠ **Pago parcial.** El pendiente es de {_fmt_q(p['amount'])} pero el "
-            f"documento es de {_fmt_q(amount)}. Faltan **{_fmt_q(falt)}**.\n\n"
-            f"Al resolver, marcaremos este pendiente como cubierto y crearemos un "
-            f"nuevo pendiente de {_fmt_q(falt)} para cuando suban el complemento."
-        )
-        if st.button(
-            f"Aceptar pago parcial y crear pendiente por {_fmt_q(falt)}",
-            key=f"resolve_partial_{p['id']}",
-            type="primary",
-            use_container_width=True,
-        ):
-            _do_resolve_pendings_partial(
-                p,
-                resolver_label=f"inline-{ref}",
-                slip_or_pdf_id=ref,
-                amount=amount,
-                remainder=falt,
-                note=f"Pago parcial inline subiendo {extract['filename']}",
-            )
-
-    elif diff > 1.0:
-        # Excedente: el documento es mayor que el pendiente → alertar, NO resolver auto
-        excess = diff
-        st.error(
-            f"🚨 **Excedente sospechoso.** El pendiente es de {_fmt_q(p['amount'])} pero el "
-            f"documento es de {_fmt_q(amount)}. Sobran **{_fmt_q(excess)}**.\n\n"
-            f"Esta diferencia no se resuelve automáticamente. Posibles causas:\n"
-            f"- El documento cubre **más de un pendiente** — revisa si hay combinaciones arriba\n"
-            f"- El monto se ingresó mal en algún lado\n"
-            f"- Hay un depósito adicional que aún no se ha registrado\n\n"
-            f"Revisa manualmente antes de continuar."
-        )
-
-    else:
-        st.info("No se encontró cómo aplicar este documento. Verifica los datos.")
 
 
 def _do_resolve_pendings(pendings: list[dict], resolver_label: str,
