@@ -889,6 +889,92 @@ Devuelve SOLO un JSON con esta forma exacta, sin texto adicional ni markdown:
 }"""
 
 
+EXTRACT_AUTO_PROMPT = """Eres un asistente que recibe UN documento (foto o PDF) y debe identificar automáticamente qué tipo de documento es.
+
+Posibles tipos:
+1. **boleta** = boleta de depósito bancario (Banco G&T Continental u otro). Características:
+   - Tiene un número grande "J No. XXXXXXXX" en rojo arriba (o "No. Comprobante: XXXXXXXX")
+   - Muestra "TOTAL DEPOSITO: QXXX.XX"
+   - Puede decir "REIMPRESION Autoriz."
+   - Tiene nombre del cliente: "VINTAGE INTERNACIONAL, SOCIEDAD ANONIMA" y cuenta "082-0004437-6" (o similar)
+
+2. **pdf_cierre** = PDF de cierre de caja del POS de la tienda. Características:
+   - Tiene "POS/AAAA/MM/DD/NNNN" en el encabezado
+   - Lista cierres por forma de pago: CREDOMATIC, VISANET, Efectivo
+   - Indica caja, cajero, fecha de apertura/cierre
+
+3. **otro** = cualquier otra cosa que no sea ninguno de los anteriores.
+
+Si es **boleta**, extrae:
+- slip_number: el "J No." o "No. Comprobante"
+- amount: el TOTAL DEPOSITO
+- date: fecha (YYYY-MM-DD si es posible)
+
+Si es **pdf_cierre**, extrae:
+- pos_ref: el "POS/AAAA/MM/DD/NNNN"
+- cashier: nombre del cajero
+- store: "6ta Avenida" o "7ma Avenida"
+- amount: el TOTAL DEPOSITO BANCARIO del cierre (no las ventas totales)
+
+Devuelve SOLO un JSON con esta forma exacta, sin texto adicional ni markdown:
+{
+  "document_type": "boleta" | "pdf_cierre" | "otro",
+  "slip_number": "50613518" (solo si boleta),
+  "pos_ref": "POS/2026/05/14/7500" (solo si pdf_cierre),
+  "cashier": "..." (solo si pdf_cierre),
+  "store": "..." (solo si pdf_cierre),
+  "amount": 879.50,
+  "date": "2026-05-14",
+  "confidence": "high" | "medium" | "low",
+  "notes": ""
+}
+
+Si no puedes leer un campo con claridad, ponlo como "" (string vacío) o null. Baja la confidence a "low" si dudas."""
+
+
+def extract_auto(file_bytes: bytes, mime: str, filename: str) -> dict:
+    """Auto-detect document type (boleta vs pdf_cierre) and extract data."""
+    import anthropic
+    api_key = st.secrets["anthropic"]["api_key"]
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content_blocks = [{
+        "type": "text",
+        "text": f"Archivo: {filename}",
+    }]
+    if "pdf" in (mime or "").lower() or filename.lower().endswith(".pdf"):
+        content_blocks.append({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": _to_base64(file_bytes),
+            },
+        })
+    else:
+        media = mime if mime in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media,
+                "data": _to_base64(file_bytes),
+            },
+        })
+
+    response = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=600,
+        system=EXTRACT_AUTO_PROMPT,
+        messages=[{"role": "user", "content": content_blocks}],
+    )
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
 def extract_slip_data(file_bytes: bytes, mime: str, filename: str) -> dict:
     """Extract structured data from ONE bank slip (photo or PDF)."""
     import anthropic
