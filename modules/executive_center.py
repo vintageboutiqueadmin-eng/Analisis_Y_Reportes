@@ -220,6 +220,86 @@ def _render_summary_tab(history: list[dict]):
         unsafe_allow_html=True,
     )
 
+    # ===== Manual compensations / adjustments — month-to-date =====
+    try:
+        comps_month = cash_history.list_compensations_in_period(
+            start_of_month.isoformat(), today.isoformat()
+        )
+    except Exception:
+        comps_month = []
+
+    if comps_month:
+        positive = sum(c["compensation_amount"] for c in comps_month if c["compensation_amount"] > 0)
+        negative = sum(c["compensation_amount"] for c in comps_month if c["compensation_amount"] < 0)
+        net = positive + negative
+
+        net_color = "#1B7340" if net >= 0 else "#B91C1C"
+
+        st.markdown(
+            f'<div style="margin:18px 0 8px;font-size:11px;letter-spacing:2px;'
+            f'text-transform:uppercase;color:#0B0F19;font-weight:700;">'
+            f'⚖️ Ajustes manuales del mes</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="ce-kpi-grid" style="grid-template-columns:repeat(3,1fr);">'
+            f'<div class="ce-kpi">'
+            f'<div class="ce-kpi-label">Sobrantes / ingresos</div>'
+            f'<div class="ce-kpi-value" style="color:#1B7340;">+{_fmt_q(positive)}</div>'
+            f'<div class="ce-kpi-detail">'
+            f'{sum(1 for c in comps_month if c["compensation_amount"] > 0)} ajuste(s) positivos</div>'
+            f'</div>'
+
+            f'<div class="ce-kpi">'
+            f'<div class="ce-kpi-label">Pérdidas aceptadas</div>'
+            f'<div class="ce-kpi-value" style="color:#B91C1C;">{_fmt_q(negative)}</div>'
+            f'<div class="ce-kpi-detail">'
+            f'{sum(1 for c in comps_month if c["compensation_amount"] < 0)} ajuste(s) negativos</div>'
+            f'</div>'
+
+            f'<div class="ce-kpi">'
+            f'<div class="ce-kpi-label">Impacto neto del mes</div>'
+            f'<div class="ce-kpi-value" style="color:{net_color};">'
+            f'{"+" if net >= 0 else ""}{_fmt_q(net)}</div>'
+            f'<div class="ce-kpi-detail">{len(comps_month)} ajuste(s) totales</div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.expander(f"Ver detalle de los {len(comps_month)} ajuste(s) del mes", expanded=False):
+            for c in comps_month:
+                amt = c["compensation_amount"]
+                sign_color = "#1B7340" if amt >= 0 else "#B91C1C"
+                sign_str = f"+{_fmt_q(amt)}" if amt > 0 else _fmt_q(amt)
+                ptype_label = {
+                    "boleta_huerfana": "Boleta huérfana",
+                    "deposito_sin_boleta": "Depósito sin boleta",
+                    "diferencia_interna_cierre": "Diferencia interna",
+                }.get(c["pending_type"], c["pending_type"])
+                st.markdown(
+                    f'<div style="background:#FAFBFC;border:1px solid #E8EBF0;'
+                    f'border-radius:4px;padding:10px 14px;margin-bottom:6px;'
+                    f'font-size:12px;color:#3D4554;line-height:1.6;">'
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'align-items:baseline;flex-wrap:wrap;gap:6px;">'
+                    f'<div>'
+                    f'<strong style="color:{sign_color};font-family:Geist Mono,monospace;">{sign_str}</strong>  '
+                    f'<span style="color:#6C7280;">·</span>  '
+                    f'<strong>{ptype_label}</strong>  '
+                    f'<span style="color:#6C7280;">(original {_fmt_q(c["original_amount"])})</span>'
+                    f'</div>'
+                    f'<div style="font-size:11px;color:#6C7280;">'
+                    f'{c["compensation_at"][:10]} · cierre origen del {c["origin_date"]}'
+                    f'</div>'
+                    f'</div>'
+                    f'<div style="margin-top:4px;font-size:11.5px;color:#3D4554;">'
+                    f'<strong>{c["compensation_by"]}:</strong> {c["compensation_note"]}'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
     # Breakdown by payment method (last cierre)
     st.markdown('##### Desglose del último cierre por forma de pago')
     cred = last_totals.get("credomatic", 0) or 0
@@ -735,6 +815,109 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
         )
         with st.expander(label, expanded=False):
             _render_inline_resolver(p, row_type, all_open_same_type, current_user)
+
+    # Compensation expander — always available as a manual override
+    with st.expander("⚖️ Compensación manual (sin documento)", expanded=False):
+        _render_compensation_form(p, current_user)
+
+
+def _render_compensation_form(p: dict, current_user: dict) -> None:
+    """Form to apply a manual compensation adjustment to a pending."""
+    st.markdown(
+        "<div style='background:#FEF3C7;border-left:3px solid #C9982A;"
+        "padding:10px 14px;border-radius:4px;margin-bottom:14px;"
+        "font-size:12px;color:#3D4554;line-height:1.6;'>"
+        "<strong>⚠ Uso bajo tu responsabilidad.</strong> Esta opción "
+        "cierra el pendiente <strong>sin documento de respaldo</strong>. "
+        "Úsala solo cuando ya no se puede conseguir el documento (boleta perdida, "
+        "PDF inaccesible, etc.) o cuando aceptas una pérdida/sobrante como ajuste contable. "
+        "Todos los ajustes quedan registrados con tu email y fecha en el historial del cierre."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<div style='font-size:12.5px;color:#3D4554;margin-bottom:10px;'>"
+        f"<strong>Monto del pendiente:</strong> {_fmt_q(p['amount'])}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Compensation amount input — allows negative
+    comp_amt = st.number_input(
+        "Monto de compensación (Q)",
+        value=0.0,
+        step=0.01,
+        format="%.2f",
+        key=f"comp_amt_{p['id']}",
+        help=(
+            "Positivo (+) = entró dinero / sobró  |  "
+            "Negativo (–) = salió dinero / faltó / pérdida aceptada"
+        ),
+    )
+
+    # Sign hint
+    if comp_amt > 0:
+        sign_hint = f"<span style='color:#1B7340;'>+{_fmt_q(comp_amt)} (ingreso/sobrante)</span>"
+    elif comp_amt < 0:
+        sign_hint = f"<span style='color:#B91C1C;'>{_fmt_q(comp_amt)} (pérdida/salida)</span>"
+    else:
+        sign_hint = "<span style='color:#6C7280;'>Q 0.00 (sin ajuste numérico, solo cierra el pendiente)</span>"
+    st.markdown(
+        f"<div style='font-size:11.5px;font-family:Geist Mono,monospace;"
+        f"margin:-6px 0 10px;'>{sign_hint}</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Required justification
+    note = st.text_area(
+        "Justificación / Nota (obligatorio, mínimo 10 caracteres)",
+        value="",
+        height=80,
+        key=f"comp_note_{p['id']}",
+        placeholder=(
+            "Ej. Boleta nunca llegó del banco · Cajero asume el faltante · "
+            "Sobrante aceptado como ingreso · Ajuste contable por error de POS"
+        ),
+    )
+
+    can_save = (note is not None and len(note.strip()) >= 10)
+    if not can_save and note:
+        st.caption(f"⚠ La justificación debe tener al menos 10 caracteres (actual: {len(note.strip())}).")
+
+    if st.button(
+        "💾 Aplicar compensación y cerrar pendiente",
+        key=f"comp_save_{p['id']}",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_save,
+    ):
+        try:
+            res = cash_history.resolve_pending_with_compensation(
+                pending_id=p["id"],
+                compensation_amount=float(comp_amt),
+                user_email=current_user["email"],
+                note=note.strip(),
+            )
+            if res["resolved"]:
+                comp_label = (
+                    f"+{_fmt_q(comp_amt)}" if comp_amt > 0
+                    else (_fmt_q(comp_amt) if comp_amt < 0 else "sin ajuste numérico")
+                )
+                st.success(
+                    f"✅ Pendiente cerrado con compensación de **{comp_label}** · "
+                    f"Cierre origen actualizado con el registro del ajuste. "
+                    f"La página se recargará."
+                )
+                cash_history.list_pending.clear()
+                cash_history.list_history.clear()
+                import time
+                time.sleep(1.5)
+                st.rerun()
+            else:
+                st.error("No se pudo aplicar la compensación. Recarga la página.")
+        except Exception as e:
+            st.error(f"Error: `{e}`")
 
 
 def _render_internal_diff_resolver(p: dict, current_user: dict) -> None:
