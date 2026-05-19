@@ -904,9 +904,12 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
 
     content = _build_anthropic_content(pdfs, neonet, boletas, catalog, pending)
 
+    # 16000 tokens covers ~12-15 cashier closings plus all the bank reconciliation
+    # detail, VIP lists, and findings. The Opus 4.7 model supports much more,
+    # so this is a safe ceiling for typical multi-day closings.
     response = client.messages.create(
         model="claude-opus-4-7",
-        max_tokens=8000,
+        max_tokens=16000,
         system=ANALYSIS_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
@@ -921,9 +924,30 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
 
+    # Detect truncation: if Claude stopped because of max_tokens, the response
+    # will be cut mid-JSON. Anthropic flags this via stop_reason.
+    stop_reason = getattr(response, "stop_reason", None)
+    was_truncated = (stop_reason == "max_tokens")
+
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
+        if was_truncated:
+            # The response was cut off — give a user-friendly error
+            n_pdfs = len(pdfs)
+            n_neonet = len(neonet)
+            n_boletas = len(boletas)
+            raise RuntimeError(
+                f"El análisis es muy grande para procesarse de una sola vez "
+                f"({n_pdfs} PDFs, {n_neonet} NEONET, {n_boletas} boletas). "
+                f"La respuesta de la IA quedó cortada al llegar al límite máximo "
+                f"de tokens.\n\n"
+                f"💡 **Recomendación:** Sube los cierres en grupos más pequeños — "
+                f"por ejemplo, un día a la vez (viernes, sábado, domingo por "
+                f"separado). Cada análisis se guarda en el historial y los "
+                f"pendientes se acumulan correctamente entre análisis."
+            )
+        # Otherwise, normal parse error
         raise RuntimeError(
             f"Claude devolvió un JSON inválido. Detalle: {e}\n\n"
             f"Respuesta cruda (primeros 500 chars): {text[:500]}"
