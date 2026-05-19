@@ -848,6 +848,172 @@ def resolve_pending_manually(pending_id: str, user_email: str, note: str) -> dic
     return {"resolved": 1, "origin_reports_updated": origin_count}
 
 
+def resolve_pending_with_compensation(
+    pending_id: str,
+    compensation_amount: float,
+    user_email: str,
+    note: str,
+) -> dict:
+    """
+    Resolve a pending with a manual compensation adjustment (no document).
+
+    The compensation_amount represents the net cash impact:
+      + positive  = money entered / surplus accepted
+      - negative  = money exited / loss accepted
+
+    The pending is ALWAYS marked resolved (the Lic.'s decision is authoritative),
+    and the origin report is updated with a finding capturing the adjustment for
+    audit trail purposes.
+
+    Args:
+        pending_id: the pending ID to resolve
+        compensation_amount: signed amount of the adjustment (in GTQ)
+        user_email: who is applying the adjustment (for traceability)
+        note: justification text (required by UI, not enforced here)
+
+    Returns: {"resolved": 0 or 1, "origin_reports_updated": N, "compensation": amount}
+    """
+    full = list_pending(only_open=False)
+    pending = next((p for p in full if p["id"] == pending_id), None)
+    if not pending:
+        return {"resolved": 0, "origin_reports_updated": 0, "compensation": 0}
+
+    # Store compensation data inside details_json before marking resolved
+    # so we have permanent record
+    ws = _ensure_pending_tab()
+    all_values = ws.get_all_values()
+    if not all_values:
+        return {"resolved": 0, "origin_reports_updated": 0, "compensation": 0}
+    headers = all_values[0]
+    col_idx = {h: i for i, h in enumerate(headers)}
+
+    for i, row in enumerate(all_values[1:], start=2):
+        if not row or row[0].strip() != pending_id:
+            continue
+        # Update details_json to include compensation data
+        try:
+            current_details = json.loads(row[col_idx["details_json"]] or "{}")
+        except Exception:
+            current_details = {}
+        current_details["compensation_amount"] = float(compensation_amount)
+        current_details["compensation_by"] = user_email
+        current_details["compensation_note"] = note
+        current_details["compensation_at"] = dt.datetime.now(GT_TZ).isoformat(timespec="seconds")
+        ws.update_cell(
+            i, col_idx["details_json"] + 1,
+            json.dumps(current_details, ensure_ascii=False),
+        )
+        break
+
+    # Mark resolved with a special label so we know it was a compensation
+    resolver_label = f"compensation-{user_email}"
+    if not mark_pending_resolved(pending_id, resolver_label):
+        return {"resolved": 0, "origin_reports_updated": 0, "compensation": 0}
+
+    # Update origin report with an audit-trail finding
+    origin = get_report_by_id(pending["origin_report_id"])
+    origin_updated = 0
+    if origin and origin.get("json_data"):
+        report = origin["json_data"]
+        bank = report.get("bank_reconciliation") or {}
+
+        # Type-specific cleanup so the pendant disappears from the historical view
+        ptype = pending["type"]
+        details = pending.get("details", {}) or {}
+        if ptype == "deposito_sin_boleta":
+            pos_ref = details.get("pos_ref", "")
+            bank["missing_slips"] = [
+                m for m in (bank.get("missing_slips") or [])
+                if (m.get("pos_ref") or "") != pos_ref
+            ]
+        elif ptype == "boleta_huerfana":
+            sn = details.get("slip_number", "")
+            bank["orphan_slips"] = [
+                o for o in (bank.get("orphan_slips") or [])
+                if (o.get("slip_number") or "") != sn
+            ]
+        elif ptype == "diferencia_interna_cierre":
+            pos_ref = details.get("pos_ref", "")
+            for c in (report.get("cashier_breakdown") or []):
+                if (c.get("pos_ref") or "") == pos_ref:
+                    c["diferencia_interna"] = 0
+                    prev_note = c.get("notes", "")
+                    add_note = f"[Resuelto con compensación manual de Q {compensation_amount:.2f}]"
+                    c["notes"] = (prev_note + " " + add_note).strip()
+
+        report["bank_reconciliation"] = bank
+
+        # Add audit finding
+        findings = report.get("findings") or []
+        sign_label = "ingreso" if compensation_amount > 0 else ("pérdida aceptada" if compensation_amount < 0 else "neutralizado")
+        findings.append({
+            "severity": "warn",
+            "title": "Ajuste manual aplicado por compensación",
+            "detail": (
+                f"El Lic. ({user_email}) aplicó una compensación manual de "
+                f"Q {compensation_amount:.2f} ({sign_label}) sobre el pendiente "
+                f"de {ptype} (monto original Q {pending['amount']:.2f}). "
+                f"Justificación: {note}"
+            ),
+        })
+        report["findings"] = findings
+
+        # Possibly upgrade overall_status if no other issues remain
+        if report.get("overall_status") == "warning":
+            still_has_issues = (
+                bank.get("missing_slips")
+                or bank.get("orphan_slips")
+                or any(_safe_float(c.get("diferencia_interna")) > 0
+                       for c in (report.get("cashier_breakdown") or []))
+            )
+            # Note: we DON'T auto-upgrade to "ok" when there's a manual adjustment,
+            # because the finding is still a warning. The Lic./Pablo can see the
+            # cierre is closed-but-with-manual-adjustment.
+
+        if update_report(pending["origin_report_id"], report):
+            origin_updated = 1
+
+    return {
+        "resolved": 1,
+        "origin_reports_updated": origin_updated,
+        "compensation": compensation_amount,
+    }
+
+
+def list_compensations_in_period(start_iso: str, end_iso: str) -> list[dict]:
+    """
+    Return all manual compensations applied in the given date range.
+    Reads from resolved pendings whose details contain compensation_at within range.
+    Used for monthly P&L reporting in Centro Ejecutivo > Resumen.
+    """
+    out = []
+    for p in list_pending(only_open=False):
+        if p.get("status") != "resolved":
+            continue
+        details = p.get("details", {}) or {}
+        if "compensation_amount" not in details:
+            continue
+        comp_at = details.get("compensation_at", "")
+        if not comp_at:
+            continue
+        comp_date = comp_at[:10]  # YYYY-MM-DD prefix
+        if start_iso <= comp_date <= end_iso:
+            out.append({
+                "pending_id": p["id"],
+                "pending_type": p["type"],
+                "origin_report_id": p["origin_report_id"],
+                "origin_date": p["origin_date"],
+                "original_amount": p["amount"],
+                "compensation_amount": float(details.get("compensation_amount", 0)),
+                "compensation_by": details.get("compensation_by", ""),
+                "compensation_note": details.get("compensation_note", ""),
+                "compensation_at": comp_at,
+                "details": details,
+            })
+    out.sort(key=lambda x: x["compensation_at"], reverse=True)
+    return out
+
+
 def resolve_pending_inline(pending_ids: list[str], resolver_report_id: str,
                             slip_or_pdf_id: str, amount: float,
                             note: str = "") -> dict:
