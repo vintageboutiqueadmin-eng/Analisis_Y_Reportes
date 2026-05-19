@@ -646,6 +646,91 @@ def _to_base64(data: bytes) -> str:
     return base64.standard_b64encode(data).decode("utf-8")
 
 
+# Anthropic API limit: when multiple images are in the same request, each image
+# must have no dimension > 2000px. We resize to 1800 as a safety margin.
+MAX_IMAGE_DIMENSION = 1800
+
+
+def _resize_image_if_needed(data: bytes, mime: str, filename: str) -> tuple[bytes, str]:
+    """
+    If `data` is an image (JPEG/PNG/WEBP/HEIC) and either dimension exceeds
+    MAX_IMAGE_DIMENSION, resize it preserving aspect ratio. Returns (new_bytes,
+    new_mime). For PDFs and non-images, returns the data unchanged.
+
+    This is critical: Anthropic's API rejects requests where any image dimension
+    is > 2000px when sending multiple images. Phone photos are often 4000+px.
+    """
+    # Don't touch PDFs
+    if not data:
+        return data, mime
+    fn_lower = (filename or "").lower()
+    mime_lower = (mime or "").lower()
+    if "pdf" in mime_lower or fn_lower.endswith(".pdf"):
+        return data, mime
+
+    # Only resize images
+    is_image = (
+        mime_lower.startswith("image/")
+        or any(fn_lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"))
+    )
+    if not is_image:
+        return data, mime
+
+    try:
+        from PIL import Image
+        import io
+
+        # HEIC support requires pillow-heif. If not available, fall through.
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except Exception:
+            pass
+
+        img = Image.open(io.BytesIO(data))
+
+        # Convert to RGB if needed (for JPEG output compatibility)
+        # but keep mode if already manageable
+        orig_mode = img.mode
+
+        # If neither dimension exceeds the limit, return original
+        if img.width <= MAX_IMAGE_DIMENSION and img.height <= MAX_IMAGE_DIMENSION:
+            # Still convert HEIC to JPEG for API compatibility
+            if mime_lower == "image/heic" or fn_lower.endswith(".heic"):
+                if img.mode in ("RGBA", "LA", "P"):
+                    img = img.convert("RGB")
+                out = io.BytesIO()
+                img.save(out, format="JPEG", quality=92)
+                return out.getvalue(), "image/jpeg"
+            return data, mime
+
+        # Compute new size preserving aspect ratio
+        ratio = MAX_IMAGE_DIMENSION / max(img.width, img.height)
+        new_w = int(img.width * ratio)
+        new_h = int(img.height * ratio)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        # Save: prefer original format if it's a common one; otherwise JPEG
+        out = io.BytesIO()
+        if mime_lower in ("image/png",) or fn_lower.endswith(".png"):
+            # PNG keeps quality but bigger files; convert RGBA→RGB if needed for JPEG path
+            img.save(out, format="PNG", optimize=True)
+            return out.getvalue(), "image/png"
+        elif mime_lower == "image/webp" or fn_lower.endswith(".webp"):
+            img.save(out, format="WEBP", quality=92)
+            return out.getvalue(), "image/webp"
+        else:
+            # Default: JPEG (handles JPG/HEIC/anything else)
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGB")
+            img.save(out, format="JPEG", quality=92)
+            return out.getvalue(), "image/jpeg"
+    except Exception:
+        # If resizing fails for any reason, fall back to original — better to
+        # let API reject than crash the upload flow
+        return data, mime
+
+
 def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
                               catalog: dict, pending: list) -> list:
     """Build the content blocks for the Anthropic API call."""
@@ -752,14 +837,17 @@ def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
                     },
                 })
             else:
+                resized_data, resized_mime = _resize_image_if_needed(
+                    f["data"], f["mime"], f["name"]
+                )
                 blocks.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": f["mime"] if f["mime"] in (
+                        "media_type": resized_mime if resized_mime in (
                             "image/jpeg", "image/png", "image/gif", "image/webp"
                         ) else "image/jpeg",
-                        "data": _to_base64(f["data"]),
+                        "data": _to_base64(resized_data),
                     },
                 })
 
@@ -784,14 +872,17 @@ def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
                     },
                 })
             else:
+                resized_data, resized_mime = _resize_image_if_needed(
+                    f["data"], f["mime"], f["name"]
+                )
                 blocks.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": f["mime"] if f["mime"] in (
+                        "media_type": resized_mime if resized_mime in (
                             "image/jpeg", "image/png", "image/gif", "image/webp"
                         ) else "image/jpeg",
-                        "data": _to_base64(f["data"]),
+                        "data": _to_base64(resized_data),
                     },
                 })
 
@@ -952,13 +1043,14 @@ def extract_auto(file_bytes: bytes, mime: str, filename: str) -> dict:
             },
         })
     else:
-        media = mime if mime in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
+        resized_data, resized_mime = _resize_image_if_needed(file_bytes, mime, filename)
+        media = resized_mime if resized_mime in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
         content_blocks.append({
             "type": "image",
             "source": {
                 "type": "base64",
                 "media_type": media,
-                "data": _to_base64(file_bytes),
+                "data": _to_base64(resized_data),
             },
         })
 
@@ -995,13 +1087,14 @@ def extract_slip_data(file_bytes: bytes, mime: str, filename: str) -> dict:
             },
         })
     else:
-        media = mime if mime in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
+        resized_data, resized_mime = _resize_image_if_needed(file_bytes, mime, filename)
+        media = resized_mime if resized_mime in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
         content_blocks.append({
             "type": "image",
             "source": {
                 "type": "base64",
                 "media_type": media,
-                "data": _to_base64(file_bytes),
+                "data": _to_base64(resized_data),
             },
         })
 
