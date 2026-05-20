@@ -1026,13 +1026,17 @@ def _render_inline_resolver(p: dict, row_type: str,
                 mime = uploaded.type or ""
                 data = cash_reports.extract_auto(file_bytes, mime, uploaded.name)
                 doc_type = data.get("document_type", "otro")
-                if doc_type == "boleta":
+                # Accept both new "comprobante_bancario" and legacy "boleta" for backward compat
+                if doc_type in ("comprobante_bancario", "boleta"):
                     extract = {
                         "kind": "slip",
                         "filename": uploaded.name,
                         "ref": str(data.get("slip_number", "")),
                         "amount": float(data.get("amount") or 0),
                         "date": data.get("date", ""),
+                        "bank": data.get("bank", ""),
+                        "transaction_type": data.get("transaction_type", ""),
+                        "description": data.get("description", ""),
                         "confidence": data.get("confidence", "medium"),
                     }
                 elif doc_type == "pdf_cierre":
@@ -1072,8 +1076,22 @@ def _render_inline_resolver(p: dict, row_type: str,
     amount = extract["amount"]
     confidence = extract.get("confidence", "medium")
     cfg_color = {"high": "#1B7340", "medium": "#D97706", "low": "#B91C1C"}.get(confidence, "#6C7280")
-    type_label = "📤 Boleta de banco" if extract["kind"] == "slip" else "📄 PDF de cierre del POS"
-    ref_label = "J No." if extract["kind"] == "slip" else "POS ref"
+
+    # Build a friendly label depending on the kind and (for slips) what kind of bank doc
+    if extract["kind"] == "pdf":
+        type_label = "📄 PDF de cierre del POS"
+        ref_label = "POS ref"
+    else:  # slip = comprobante bancario
+        bank = extract.get("bank", "") or ""
+        ttype = extract.get("transaction_type", "") or ""
+        ttype_pretty = {
+            "deposito": "Depósito",
+            "nota_credito": "Nota de crédito",
+            "nota_debito": "Nota de débito",
+            "transferencia": "Transferencia",
+        }.get(ttype, ttype.replace("_", " ").capitalize() if ttype else "Comprobante")
+        type_label = f"🏦 {ttype_pretty}" + (f" · {bank}" if bank else "")
+        ref_label = "No. documento"
 
     extra_info = ""
     if extract["kind"] == "pdf":
@@ -1081,8 +1099,11 @@ def _render_inline_resolver(p: dict, row_type: str,
             extra_info = f"  ·  <strong>Cajero:</strong> {extract['cashier']}"
         if extract.get("store"):
             extra_info += f"  ·  <strong>Tienda:</strong> {extract['store']}"
-    elif extract.get("date"):
-        extra_info = f"  ·  <strong>Fecha:</strong> {extract['date']}"
+    else:
+        if extract.get("date"):
+            extra_info = f"  ·  <strong>Fecha:</strong> {extract['date']}"
+        if extract.get("description"):
+            extra_info += f"  ·  <strong>Concepto:</strong> {extract['description']}"
 
     st.markdown(
         f"<div style='background:#FAFBFC;border:1px solid #E8EBF0;border-radius:4px;"
