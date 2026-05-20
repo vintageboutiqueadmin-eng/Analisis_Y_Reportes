@@ -1004,51 +1004,85 @@ Devuelve SOLO un JSON con esta forma exacta, sin texto adicional ni markdown:
 }"""
 
 
-EXTRACT_AUTO_PROMPT = """Eres un asistente que recibe UN documento (foto o PDF) y debe identificar automáticamente qué tipo de documento es.
+EXTRACT_AUTO_PROMPT = """Eres un asistente que recibe UN documento (foto o PDF) y debe identificar automáticamente qué tipo de documento es y extraer los datos relevantes para conciliación contable de Vintage Boutique (Antigua Guatemala).
 
-Posibles tipos:
-1. **boleta** = boleta de depósito bancario (Banco G&T Continental u otro). Características:
-   - Tiene un número grande "J No. XXXXXXXX" en rojo arriba (o "No. Comprobante: XXXXXXXX")
-   - Muestra "TOTAL DEPOSITO: QXXX.XX"
-   - Puede decir "REIMPRESION Autoriz."
-   - Tiene nombre del cliente: "VINTAGE INTERNACIONAL, SOCIEDAD ANONIMA" y cuenta "082-0004437-6" (o similar)
+## Tipos de documentos posibles
 
-2. **pdf_cierre** = PDF de cierre de caja del POS de la tienda. Características:
-   - Tiene "POS/AAAA/MM/DD/NNNN" en el encabezado
-   - Lista cierres por forma de pago: CREDOMATIC, VISANET, Efectivo
-   - Indica caja, cajero, fecha de apertura/cierre
+### 1. **comprobante_bancario** — cualquier comprobante de transacción en una cuenta del banco
+Esto incluye CUALQUIER documento bancario que evidencie que entró o salió dinero de una cuenta de Vintage. Acepta múltiples bancos y formatos:
 
-3. **otro** = cualquier otra cosa que no sea ninguno de los anteriores.
+- **Boleta de depósito tradicional** (Banco G&T Continental u otro):
+  - Número grande "J No. XXXXXXXX" en rojo arriba (o "No. Comprobante: XXXXXXXX")
+  - Muestra "TOTAL DEPOSITO: QXXX.XX"
+  - Puede decir "REIMPRESION Autoriz."
+  - Cuenta de Vintage Internacional
 
-Si es **boleta**, extrae:
-- slip_number: el "J No." o "No. Comprobante"
-- amount: el TOTAL DEPOSITO
-- date: fecha (YYYY-MM-DD si es posible)
+- **Nota de crédito / débito electrónica** (Banco Industrial BI-banking, otros bancos):
+  - Tiene un "No." de documento (ej. "No. 19180431")
+  - Indica "NOTA DE CRÉDITO" o "NOTA DE DÉBITO"
+  - Muestra "CRÉDITO POR" o "DÉBITO POR" con monto "GTQ.XXX.XX"
+  - Tiene descripción de la transacción
+  - Aparece "BANCO INDUSTRIAL, S.A." u otro banco emisor
+  - Cuenta de Vintage Internacional
 
-Si es **pdf_cierre**, extrae:
-- pos_ref: el "POS/AAAA/MM/DD/NNNN"
-- cashier: nombre del cajero
-- store: "6ta Avenida" o "7ma Avenida"
-- amount: el TOTAL DEPOSITO BANCARIO del cierre (no las ventas totales)
+- **Transferencia electrónica / SPEI / ACH** (cualquier banco):
+  - Comprobante de transferencia recibida o enviada
+  - Tiene un número de referencia o folio
+  - Muestra monto y descripción
+
+- **Comprobante de pago electrónico** (cualquier formato bancario):
+  - Cualquier otro tipo de documento emitido por un banco que confirme un movimiento en cuenta
+
+Para cualquier comprobante bancario, extrae:
+- `slip_number`: el identificador único del documento (J No., No. de Comprobante, No. de Documento, número de referencia, folio — lo que sea el ID único del documento bancario). Es OBLIGATORIO encontrar algún ID — busca en todo el documento.
+- `amount`: el monto principal de la transacción. Para notas de crédito = monto acreditado. Para boletas = TOTAL DEPOSITO. Para transferencias = monto transferido. Si hay varios montos, usa el TOTAL principal.
+- `date`: fecha de la transacción (YYYY-MM-DD si es posible). Para notas BI usa el campo "FECHA". Para boletas G&T usa la fecha en el encabezado. Para otros, la fecha más relevante de la transacción.
+- `bank`: nombre del banco emisor (ej. "G&T Continental", "Banco Industrial", "Banrural"). Si no se identifica, deja "".
+- `transaction_type`: tipo específico (ej. "deposito", "nota_credito", "nota_debito", "transferencia"). Si no se identifica claramente, deja "deposito".
+- `description`: cualquier descripción/concepto que aparezca en el documento (ej. "CHAQUETAS", "DEPOSITO MONETARIO"). Opcional.
+
+### 2. **pdf_cierre** — PDF de cierre de caja del POS de la tienda
+Características:
+- Tiene "POS/AAAA/MM/DD/NNNN" en el encabezado
+- Lista cierres por forma de pago: CREDOMATIC, VISANET, Efectivo
+- Indica caja, cajero, fecha de apertura/cierre
+
+Para pdf_cierre, extrae:
+- `pos_ref`: el "POS/AAAA/MM/DD/NNNN"
+- `cashier`: nombre del cajero
+- `store`: "6ta Avenida" o "7ma Avenida"
+- `amount`: el TOTAL DEPOSITO BANCARIO del cierre (no las ventas totales)
+- `date`: la fecha del cierre
+
+### 3. **otro** — cualquier otra cosa que no sea ninguno de los anteriores
+Solo úsalo si verdaderamente no es ni un comprobante bancario ni un cierre del POS.
+
+## Formato de respuesta
 
 Devuelve SOLO un JSON con esta forma exacta, sin texto adicional ni markdown:
 {
-  "document_type": "boleta" | "pdf_cierre" | "otro",
-  "slip_number": "50613518" (solo si boleta),
-  "pos_ref": "POS/2026/05/14/7500" (solo si pdf_cierre),
-  "cashier": "..." (solo si pdf_cierre),
-  "store": "..." (solo si pdf_cierre),
-  "amount": 879.50,
-  "date": "2026-05-14",
+  "document_type": "comprobante_bancario" | "pdf_cierre" | "otro",
+  "slip_number": "...",       // ID único del documento bancario o vacío si pdf_cierre
+  "pos_ref": "...",           // solo si pdf_cierre
+  "cashier": "...",           // solo si pdf_cierre
+  "store": "...",             // solo si pdf_cierre
+  "bank": "...",              // solo si comprobante_bancario
+  "transaction_type": "...",  // solo si comprobante_bancario
+  "description": "...",       // solo si comprobante_bancario
+  "amount": 0.00,
+  "date": "YYYY-MM-DD",
   "confidence": "high" | "medium" | "low",
   "notes": ""
 }
 
-Si no puedes leer un campo con claridad, ponlo como "" (string vacío) o null. Baja la confidence a "low" si dudas."""
+**REGLAS IMPORTANTES:**
+- Si no puedes leer un campo con claridad, ponlo como "" (string vacío) o null. Baja la confidence a "low" si dudas.
+- NUNCA inventes números. Si no ves claramente un ID o monto, déjalo vacío.
+- Si el documento es claramente un comprobante de un movimiento bancario (entrada o salida de dinero a/de una cuenta), siempre clasifícalo como `comprobante_bancario`, sin importar el banco o el formato exacto."""
 
 
 def extract_auto(file_bytes: bytes, mime: str, filename: str) -> dict:
-    """Auto-detect document type (boleta vs pdf_cierre) and extract data."""
+    """Auto-detect document type (any bank receipt vs pdf_cierre) and extract data."""
     import anthropic
     api_key = st.secrets["anthropic"]["api_key"]
     client = anthropic.Anthropic(api_key=api_key)
