@@ -94,6 +94,41 @@ def get_stores() -> list[dict]:
 
 
 @st.cache_data(ttl=15, show_spinner=False)
+def get_attendance_for_range(start_iso: str, end_iso: str) -> list[dict]:
+    """
+    Read all attendance rows between start_iso and end_iso (inclusive),
+    in a single sheet fetch. Returns the same shape as get_attendance_for_date
+    but with one extra read regardless of range size.
+    """
+    ws = get_spreadsheet().worksheet(_tab_name("attendance", "tab_attendance"))
+    rows = ws.get_all_records()
+    out = []
+    for r in rows:
+        date_val = str(r.get("date", "")).strip()
+        if not date_val or date_val < start_iso or date_val > end_iso:
+            continue
+        out.append({
+            "date": date_val,
+            "employee_id": str(r.get("employee_id", "")).strip(),
+            "status": str(r.get("status", "working")).strip() or "working",
+            "shift_start": str(r.get("shift_start", "")).strip() or None,
+            "shift_end": str(r.get("shift_end", "")).strip() or None,
+            "lunch_start": str(r.get("lunch_start", "")).strip() or None,
+            "lunch_end": str(r.get("lunch_end", "")).strip() or None,
+            "overtime_minutes": _to_int(r.get("overtime_minutes")),
+            "is_late": _to_bool(r.get("is_late")),
+            "actual_start": str(r.get("actual_start", "")).strip() or None,
+            "notes": str(r.get("notes", "")).strip(),
+            "worked_store_id": str(r.get("worked_store_id", "")).strip() or None,
+            "shift_split": _to_bool(r.get("shift_split")),
+            "segment2_store_id": str(r.get("segment2_store_id", "")).strip() or None,
+            "segment2_start": str(r.get("segment2_start", "")).strip() or None,
+            "segment2_end": str(r.get("segment2_end", "")).strip() or None,
+        })
+    return out
+
+
+@st.cache_data(ttl=15, show_spinner=False)
 def get_attendance_for_date(date_iso: str) -> list[dict]:
     ws = get_spreadsheet().worksheet(_tab_name("attendance", "tab_attendance"))
     rows = ws.get_all_records()
