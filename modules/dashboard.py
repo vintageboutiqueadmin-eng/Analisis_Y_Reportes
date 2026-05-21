@@ -14,6 +14,7 @@ from . import sheets
 from .dashboard_html import (
     CSS, render_dashboard_body, parse_time,
 )
+from .dashboard_weekly import render_weekly_view
 
 
 # Guatemala is UTC-6, no DST. Streamlit Cloud runs UTC, so we must localize.
@@ -358,25 +359,40 @@ def render(current_user: dict) -> None:
         )
 
         st.markdown("---")
-        st.markdown("**Fecha**")
-        selected_date = st.date_input(
-            "Fecha a consultar",
-            value=st.session_state.get("dashboard_date", today_gt()),
-            format="DD/MM/YYYY",
+        st.markdown("**Vista**")
+        view_mode = st.radio(
+            "Vista",
+            ["Diario", "Semanal", "Resumen horas"],
+            index={
+                "Diario": 0, "Semanal": 1, "Resumen horas": 2,
+            }.get(st.session_state.get("dashboard_view", "Diario"), 0),
             label_visibility="collapsed",
         )
-        st.session_state.dashboard_date = selected_date
+        st.session_state.dashboard_view = view_mode
 
-        col_a, col_b = st.columns(2)
-        if col_a.button("← Ayer", use_container_width=True):
-            st.session_state.dashboard_date = selected_date - dt.timedelta(days=1)
-            st.rerun()
-        if col_b.button("Hoy", use_container_width=True):
-            st.session_state.dashboard_date = today_gt()
-            st.rerun()
-        if st.button("Mañana →", use_container_width=True):
-            st.session_state.dashboard_date = selected_date + dt.timedelta(days=1)
-            st.rerun()
+        st.markdown("---")
+        st.markdown("**Fecha**")
+        if view_mode == "Diario":
+            selected_date = st.date_input(
+                "Fecha a consultar",
+                value=st.session_state.get("dashboard_date", today_gt()),
+                format="DD/MM/YYYY",
+                label_visibility="collapsed",
+            )
+            st.session_state.dashboard_date = selected_date
+
+            col_a, col_b = st.columns(2)
+            if col_a.button("← Ayer", use_container_width=True):
+                st.session_state.dashboard_date = selected_date - dt.timedelta(days=1)
+                st.rerun()
+            if col_b.button("Hoy", use_container_width=True):
+                st.session_state.dashboard_date = today_gt()
+                st.rerun()
+            if st.button("Mañana →", use_container_width=True):
+                st.session_state.dashboard_date = selected_date + dt.timedelta(days=1)
+                st.rerun()
+        else:
+            st.caption("📅 Mostrando la semana actual (Lunes a Domingo)")
 
         st.markdown("---")
         if st.button("↻ Actualizar datos", use_container_width=True):
@@ -402,7 +418,32 @@ def render(current_user: dict) -> None:
         if refresh_count > 0:
             st.caption(f"↻ Actualizaciones automáticas: {refresh_count}")
 
-    # Main body
+    # ====== Route by view mode ======
+    current_view = st.session_state.get("dashboard_view", "Diario")
+
+    if current_view == "Semanal":
+        can_edit = current_user["role"] in ("admin", "manager")
+        try:
+            render_weekly_view(current_user, can_edit=can_edit)
+        except Exception as e:
+            st.error(
+                "No se pudo cargar la vista semanal.\n\n"
+                f"Detalle: `{e}`"
+            )
+        return
+
+    if current_view == "Resumen horas":
+        from .dashboard_hours import render_hours_summary
+        try:
+            render_hours_summary(current_user)
+        except Exception as e:
+            st.error(
+                "No se pudo cargar el resumen de horas.\n\n"
+                f"Detalle: `{e}`"
+            )
+        return
+
+    # Daily view (default)
     try:
         data = _build_data(st.session_state.dashboard_date)
     except Exception as e:
