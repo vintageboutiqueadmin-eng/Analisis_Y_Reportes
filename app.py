@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from modules import auth, dashboard, capture, admin, cash_reports, executive_center
+from modules import auth, dashboard, capture, admin, cash_reports, executive_center, password_gate
 
 st.set_page_config(
     page_title="Vintage Boutique · Asistencia",
@@ -116,6 +116,11 @@ def render_role_nav(user: dict) -> str:
 
 
 def main() -> None:
+    # ===== LAYER 1: Password gate (always runs first) =====
+    if not password_gate.render_gate():
+        return
+
+    # ===== LAYER 2: Google OAuth + role check =====
     user = auth.authenticate()
 
     # Not logged in at all → show dev login form (production users come pre-authed)
