@@ -819,6 +819,190 @@ def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
     }
 
 
+def autoresolve_cross_pending_pairs(
+    user_email: str, tolerance: float = 1.0
+) -> dict:
+    """
+    Scan the open pending tray and find pairs of (boleta_huerfana, deposito_sin_boleta)
+    where amounts match within tolerance. For each pair, resolve BOTH pendings as
+    a mutual auto-match, and update BOTH origin reports with a finding noting the
+    retroactive reconciliation.
+
+    Returns dict with stats.
+    """
+    open_pendings = list_pending(only_open=True)
+
+    orphans = [p for p in open_pendings if p["type"] == "boleta_huerfana"]
+    missing = [p for p in open_pendings if p["type"] == "deposito_sin_boleta"]
+
+    if not orphans or not missing:
+        return {
+            "pairs_resolved": 0,
+            "reports_updated": 0,
+            "pair_details": [],
+        }
+
+    used_orphan_ids = set()
+    used_missing_ids = set()
+    pair_details = []
+
+    # Greedy match: for each missing, find the best-matching orphan by amount.
+    # Sort by exact match first (smaller diff wins).
+    for miss in missing:
+        miss_amt = float(miss.get("amount") or 0)
+        best_orphan = None
+        best_diff = tolerance + 0.001
+        for orph in orphans:
+            if orph["id"] in used_orphan_ids:
+                continue
+            orph_amt = float(orph.get("amount") or 0)
+            diff = abs(miss_amt - orph_amt)
+            if diff <= tolerance and diff < best_diff:
+                best_orphan = orph
+                best_diff = diff
+
+        if best_orphan is None:
+            continue
+
+        # Build a resolver_label that lets us identify these as cross-pending
+        resolver_label = f"cross-pending-pair-{user_email}"
+
+        # Mark both as resolved
+        ok1 = mark_pending_resolved(miss["id"], resolver_label)
+        ok2 = mark_pending_resolved(best_orphan["id"], resolver_label)
+        if not (ok1 and ok2):
+            continue
+
+        used_orphan_ids.add(best_orphan["id"])
+        used_missing_ids.add(miss["id"])
+
+        # Update both origin reports with a finding
+        miss_details = miss.get("details", {}) or {}
+        orph_details = best_orphan.get("details", {}) or {}
+
+        miss_pos_ref = miss_details.get("pos_ref", "")
+        orph_slip = orph_details.get("slip_number", "")
+
+        miss_origin = miss.get("origin_report_id")
+        orph_origin = best_orphan.get("origin_report_id")
+
+        # Update the missing's origin (remove from missing_slips, add to matched)
+        miss_report = get_report_by_id(miss_origin) if miss_origin else None
+        if miss_report and miss_report.get("json_data"):
+            data = miss_report["json_data"]
+            bank = data.get("bank_reconciliation") or {}
+            bank["missing_slips"] = [
+                m for m in (bank.get("missing_slips") or [])
+                if (m.get("pos_ref") or "") != miss_pos_ref
+            ]
+            new_matched = list(bank.get("matched") or [])
+            new_matched.append({
+                "pos_ref": miss_pos_ref,
+                "pos_amount": miss_amt,
+                "slip_number": orph_slip,
+                "slip_amount": float(best_orphan.get("amount") or 0),
+                "cashier": miss_details.get("cashier", ""),
+                "rescued_retroactively": True,
+            })
+            bank["matched"] = new_matched
+            data["bank_reconciliation"] = bank
+
+            findings = data.get("findings") or []
+            findings.append({
+                "severity": "info",
+                "title": "Match cuadrado retrospectivamente",
+                "detail": (
+                    f"El depósito {miss_pos_ref} de {miss_details.get('cashier','?')} "
+                    f"(Q {miss_amt:.2f}) fue cuadrado retroactivamente con la boleta "
+                    f"J No. {orph_slip} del reporte origen {orph_origin}. "
+                    f"Reconciliación automatizada por {user_email}."
+                ),
+            })
+            data["findings"] = findings
+
+            # If this was the only issue, possibly upgrade status
+            if data.get("overall_status") == "warning":
+                bank_now = data.get("bank_reconciliation") or {}
+                cashier_diffs = sum(
+                    1 for c in (data.get("cashier_breakdown") or [])
+                    if _safe_float(c.get("diferencia_interna")) > 0
+                )
+                if (not bank_now.get("missing_slips")
+                    and not bank_now.get("orphan_slips")
+                    and cashier_diffs == 0):
+                    data["overall_status"] = "ok"
+
+            update_report(miss_origin, data)
+
+        # Update the orphan's origin (remove from orphan_slips, add to matched)
+        # Skip if same report as miss (would double-update)
+        if orph_origin and orph_origin != miss_origin:
+            orph_report = get_report_by_id(orph_origin)
+            if orph_report and orph_report.get("json_data"):
+                data = orph_report["json_data"]
+                bank = data.get("bank_reconciliation") or {}
+                bank["orphan_slips"] = [
+                    o for o in (bank.get("orphan_slips") or [])
+                    if (o.get("slip_number") or "") != orph_slip
+                ]
+                new_matched = list(bank.get("matched") or [])
+                new_matched.append({
+                    "pos_ref": miss_pos_ref,
+                    "pos_amount": miss_amt,
+                    "slip_number": orph_slip,
+                    "slip_amount": float(best_orphan.get("amount") or 0),
+                    "cashier": miss_details.get("cashier", ""),
+                    "rescued_retroactively": True,
+                })
+                bank["matched"] = new_matched
+                data["bank_reconciliation"] = bank
+
+                findings = data.get("findings") or []
+                findings.append({
+                    "severity": "info",
+                    "title": "Match cuadrado retrospectivamente",
+                    "detail": (
+                        f"La boleta J No. {orph_slip} (Q {best_orphan['amount']:.2f}) "
+                        f"fue cuadrada retroactivamente con el depósito {miss_pos_ref} "
+                        f"de {miss_details.get('cashier','?')} del reporte origen {miss_origin}. "
+                        f"Reconciliación automatizada por {user_email}."
+                    ),
+                })
+                data["findings"] = findings
+
+                if data.get("overall_status") == "warning":
+                    bank_now = data.get("bank_reconciliation") or {}
+                    cashier_diffs = sum(
+                        1 for c in (data.get("cashier_breakdown") or [])
+                        if _safe_float(c.get("diferencia_interna")) > 0
+                    )
+                    if (not bank_now.get("missing_slips")
+                        and not bank_now.get("orphan_slips")
+                        and cashier_diffs == 0):
+                        data["overall_status"] = "ok"
+
+                update_report(orph_origin, data)
+
+        pair_details.append({
+            "missing_pos_ref": miss_pos_ref,
+            "missing_amount": miss_amt,
+            "missing_cashier": miss_details.get("cashier", ""),
+            "missing_origin": miss_origin,
+            "orphan_slip": orph_slip,
+            "orphan_amount": float(best_orphan.get("amount") or 0),
+            "orphan_origin": orph_origin,
+        })
+
+    return {
+        "pairs_resolved": len(pair_details),
+        "reports_updated": len(set(
+            [d["missing_origin"] for d in pair_details] +
+            [d["orphan_origin"] for d in pair_details]
+        )),
+        "pair_details": pair_details,
+    }
+
+
 def resolve_pending_manually(pending_id: str, user_email: str, note: str) -> dict:
     """
     Mark a single pending as resolved without an attached document
