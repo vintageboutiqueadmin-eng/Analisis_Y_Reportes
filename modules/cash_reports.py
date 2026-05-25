@@ -495,7 +495,36 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
 
 **⚠️ REGLA #0.5 — UNA BOLETA SE USA UNA SOLA VEZ.** Cada `J No.` único puede aparecer SOLO UNA VEZ en `matched` (haciendo pareja con UN solo `pos_ref`). Si la misma boleta parece cuadrar con dos depósitos diferentes, escoge la mejor coincidencia (más exacta por monto) y deja el otro depósito en `missing_slips`. Lo mismo aplica a PDFs (un POS ref no puede aparecer dos veces) y tickets (un lote no puede aparecer dos veces).
 
-**REGLA #1 — Ignora completamente las fechas para hacer matching.** El depósito de un cierre puede hacerse al día siguiente, dos días después, o el lunes para cierres del fin de semana. Lo que importa es que los montos cuadren. Tolerancia de Q 1.00.
+**⚠️ REGLA #1 — IGNORA COMPLETAMENTE LAS FECHAS PARA HACER MATCHING.** El depósito de un cierre puede hacerse al día siguiente, dos días después, o el lunes para cierres del fin de semana. **Lo único que importa es que los montos cuadren. Tolerancia de Q 1.00.**
+
+**🚨 ANTES DE PONER UN DEPÓSITO EN `missing_slips`, ES OBLIGATORIO HACER ESTE CHECK:**
+   - Recorre TODAS las boletas de HOY que aún no estén en `matched`.
+   - ¿Hay alguna cuyo monto = monto del depósito (±Q 1.00)? → Si SÍ → es un MATCH. Va en `matched`. NO en `missing_slips`.
+   - SOLO si NO encuentras boleta del mismo monto, va en `missing_slips`.
+
+**🚨 ANTES DE PONER UNA BOLETA EN `orphan_slips`, ES OBLIGATORIO HACER ESTE CHECK:**
+   - Recorre TODOS los depósitos extraídos de PDFs de HOY que aún no estén en `matched`.
+   - ¿Hay alguno cuyo monto = monto de la boleta (±Q 1.00)? → Si SÍ → es un MATCH. Va en `matched`. NO en `orphan_slips`.
+   - SOLO si NO encuentras depósito del mismo monto, va en `orphan_slips`.
+
+**EJEMPLO PRÁCTICO:**
+   - PDF dice: "Depósito Q 173.50" para Diana, POS/2026/05/22/7540 (cierre del 22/05)
+   - Recibes boleta J No. 50613861 · Q 173.50 (fecha 23/05)
+   - SON MATCH. La boleta del 23 cuadra con el depósito del 22 por monto. Va en `matched`, NO digas que "falta boleta" Y "boleta huérfana" del mismo monto al mismo tiempo. ESO ES UN ERROR GRAVE.
+
+**⚠️ REGLA #1.5 — UN PDF PUEDE TENER MÚLTIPLES DEPÓSITOS PARCIALES.** Esto es importante:
+   - Un cierre de cajero puede tener UN solo depósito grande (caso típico: una sola boleta cuadra), o **MÚLTIPLES depósitos parciales** (el cajero hizo varios viajes al banco, o partió el monto en varias boletas).
+   - El PDF muestra cada depósito como una línea separada en la sección "Depósito" — por ejemplo:
+     ```
+     POS/.../7541  DEP GYT VINTAGE   Q 1,824.00
+     POS/.../7541  DEP GYT VINTAGE   Q 900.00
+     Subtotal Depósito: Q 2,724.00
+     ```
+   - Trata **CADA línea de depósito como un depósito independiente** que debe matchearse contra UNA boleta individual.
+   - En el ejemplo anterior: busca una boleta de Q 1,824 Y una boleta de Q 900. Si encuentras ambas, ambas van en `matched`. NO sumes los depósitos y busques una sola boleta de Q 2,724.
+   - El campo `deposito` del `cashier_breakdown` puede ser el subtotal (Q 2,724 en el ejemplo), pero en `bank_reconciliation.matched` listas cada depósito individual con su boleta correspondiente.
+
+**⚠️ REGLA #0.5 — UNA BOLETA SE USA UNA SOLA VEZ.** Cada `J No.` único puede aparecer SOLO UNA VEZ en `matched` (haciendo pareja con UN solo `pos_ref`). Si la misma boleta parece cuadrar con dos depósitos diferentes, escoge la mejor coincidencia (más exacta por monto) y deja el otro depósito en `missing_slips`. Lo mismo aplica a PDFs (un POS ref no puede aparecer dos veces) y tickets (un lote no puede aparecer dos veces).
 
 **REGLA #2 — Detección de duplicados contra historial.** Te paso un catálogo con los IDs de documentos ya procesados (pos_refs, bank_slip_numbers, neonet_lotes). Si en los archivos de HOY encuentras:
    - Un PDF cuyo POS ref ya está en el catálogo → es duplicado del cierre anterior. **EXCLÚYELO totalmente del cálculo de totales** (no sumes sus montos) y repórtalo como finding rojo indicando en cuál cierre histórico está.
@@ -511,6 +540,12 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
 **REGLA #4 — Detección de duplicados internos del upload actual.** Si dos PDFs del MISMO upload tienen el mismo POS ref, o dos boletas tienen el mismo J No., o dos tickets tienen el mismo procesador+lote, trátalo igual: solo cuenta una vez, reporta el duplicado.
 
 **REGLA #5 — Diferencias internas de PDF deben reportarse SIEMPRE.** Si un PDF muestra "Diferencia: Q X.XX" donde X > 0 (efectivo cobrado ≠ depósito realizado), reporta `diferencia_interna: X.XX` en el `cashier_breakdown` correspondiente. Estas diferencias representan dinero que el cajero debe reponer.
+
+**REGLA #6 — TOTALES MANUALES DE TICKETS DE TARJETAS.** Si en el contexto que te paso encuentras un campo `manual_credomatic_total` o `manual_visanet_total` con un valor > 0, ese es el total real del ticket físico (escrito a mano por el Lic. porque el papel estaba ilegible). En ese caso:
+   - Usa ese valor como `ticket_total` en `card_reconciliation`.
+   - NO intentes leer el total del ticket de la imagen (el papel térmico está borroso).
+   - Concilia el `pos_total` contra ese `ticket_total` manual.
+   - En `note` indica: "Total del ticket ingresado manualmente por usuario debido a papel ilegible".
 
 ## Tu análisis debe producir
 
@@ -732,9 +767,29 @@ def _resize_image_if_needed(data: bytes, mime: str, filename: str) -> tuple[byte
 
 
 def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
-                              catalog: dict, pending: list) -> list:
+                              catalog: dict, pending: list,
+                              manual_credomatic: float = 0.0,
+                              manual_visanet: float = 0.0) -> list:
     """Build the content blocks for the Anthropic API call."""
     blocks = []
+
+    # Manual ticket totals override (when papel térmico is illegible)
+    if manual_credomatic > 0 or manual_visanet > 0:
+        manual_text = (
+            "=== TOTALES MANUALES DE TICKETS (sobreescriben lectura visual) ===\n"
+            "El usuario indicó manualmente los siguientes totales porque el papel "
+            "térmico está parcialmente ilegible. USA ESTOS VALORES en `card_reconciliation.ticket_total`, "
+            "NO intentes leerlos de la imagen del ticket.\n\n"
+        )
+        if manual_credomatic > 0:
+            manual_text += f"  manual_credomatic_total = Q {manual_credomatic:.2f}\n"
+        if manual_visanet > 0:
+            manual_text += f"  manual_visanet_total = Q {manual_visanet:.2f}\n"
+        manual_text += (
+            "\nEn el `card_reconciliation.note` del lado correspondiente, indica: "
+            "'Total del ticket ingresado manualmente por usuario debido a papel ilegible.'\n"
+        )
+        blocks.append({"type": "text", "text": manual_text})
 
     # Catalog of already-processed IDs (for duplicate detection)
     catalog_text = (
@@ -895,14 +950,20 @@ def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
 
 
 def _call_claude(pdfs: list, neonet: list, boletas: list,
-                 catalog: dict, pending: list) -> dict:
+                 catalog: dict, pending: list,
+                 manual_credomatic: float = 0.0,
+                 manual_visanet: float = 0.0) -> dict:
     """Call Claude Opus 4.7 with all uploaded files + historical context."""
     import anthropic
 
     api_key = st.secrets["anthropic"]["api_key"]
     client = anthropic.Anthropic(api_key=api_key)
 
-    content = _build_anthropic_content(pdfs, neonet, boletas, catalog, pending)
+    content = _build_anthropic_content(
+        pdfs, neonet, boletas, catalog, pending,
+        manual_credomatic=manual_credomatic,
+        manual_visanet=manual_visanet,
+    )
 
     # 16000 tokens covers ~12-15 cashier closings plus all the bank reconciliation
     # detail, VIP lists, and findings. The Opus 4.7 model supports much more,
@@ -930,7 +991,7 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
     was_truncated = (stop_reason == "max_tokens")
 
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError as e:
         if was_truncated:
             # The response was cut off — give a user-friendly error
@@ -952,6 +1013,118 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
             f"Claude devolvió un JSON inválido. Detalle: {e}\n\n"
             f"Respuesta cruda (primeros 500 chars): {text[:500]}"
         )
+
+    # SAFETY NET: post-process to catch any missing/orphan that should have matched
+    parsed = _autoresolve_missed_matches(parsed)
+    return parsed
+
+
+def _autoresolve_missed_matches(analysis: dict, tolerance: float = 1.0) -> dict:
+    """
+    Deterministic safety net that runs AFTER Claude's analysis.
+
+    Scans bank_reconciliation.missing_slips and bank_reconciliation.orphan_slips,
+    and matches them by amount (ignoring dates). Each successful match is moved
+    to bank_reconciliation.matched.
+
+    This protects against Claude failing to apply REGLA #1 (amount-only matching
+    across dates), which is a recurring failure mode in our data.
+
+    Returns the (possibly modified) analysis dict.
+    """
+    bank = analysis.get("bank_reconciliation") or {}
+    missing = list(bank.get("missing_slips") or [])
+    orphans = list(bank.get("orphan_slips") or [])
+    matched = list(bank.get("matched") or [])
+
+    if not missing or not orphans:
+        return analysis
+
+    # Build sets of slip_numbers and pos_refs already in matched so we don't double-match
+    used_slips = {(m.get("slip_number") or "").strip() for m in matched}
+    used_pos = {(m.get("pos_ref") or "").strip() for m in matched}
+
+    new_missing = []
+    used_orphan_indices = set()
+    rescue_count = 0
+    rescue_log = []
+
+    for miss in missing:
+        miss_amt = float(miss.get("amount") or 0)
+        miss_pos = (miss.get("pos_ref") or "").strip()
+        if miss_pos in used_pos:
+            # Already matched somehow; skip
+            continue
+
+        # Find an orphan with matching amount, not yet used
+        best_idx = None
+        best_diff = tolerance + 0.001
+        for idx, orph in enumerate(orphans):
+            if idx in used_orphan_indices:
+                continue
+            orph_sn = (orph.get("slip_number") or "").strip()
+            if orph_sn in used_slips:
+                continue
+            orph_amt = float(orph.get("amount") or 0)
+            diff = abs(miss_amt - orph_amt)
+            if diff <= tolerance and diff < best_diff:
+                best_idx = idx
+                best_diff = diff
+
+        if best_idx is not None:
+            orph = orphans[best_idx]
+            orph_sn = (orph.get("slip_number") or "").strip()
+            orph_amt = float(orph.get("amount") or 0)
+
+            # Add to matched
+            matched.append({
+                "pos_ref": miss_pos,
+                "pos_amount": miss_amt,
+                "slip_number": orph_sn,
+                "slip_amount": orph_amt,
+                "cashier": miss.get("cashier", ""),
+                "rescued_by_autoresolver": True,
+            })
+            used_orphan_indices.add(best_idx)
+            used_slips.add(orph_sn)
+            used_pos.add(miss_pos)
+            rescue_count += 1
+            rescue_log.append(
+                f"{miss_pos} ({miss.get('cashier', '?')}) Q {miss_amt:.2f} "
+                f"↔ boleta {orph_sn} Q {orph_amt:.2f}"
+            )
+        else:
+            new_missing.append(miss)
+
+    new_orphans = [
+        o for i, o in enumerate(orphans) if i not in used_orphan_indices
+    ]
+
+    # If we rescued anything, update the analysis
+    if rescue_count > 0:
+        bank["matched"] = matched
+        bank["missing_slips"] = new_missing
+        bank["orphan_slips"] = new_orphans
+        analysis["bank_reconciliation"] = bank
+
+        # Add an informational finding
+        findings = analysis.get("findings") or []
+        findings.append({
+            "severity": "info",
+            "title": f"Conciliación automática post-análisis: {rescue_count} match(es) recuperados",
+            "detail": (
+                f"El sistema detectó {rescue_count} match(es) por monto que la IA no "
+                f"había cuadrado automáticamente (regla de match por monto ignorando "
+                f"fechas). Estos depósitos y boletas se reclasificaron como `matched`:\n"
+                + "\n".join(f"  • {log}" for log in rescue_log)
+            ),
+        })
+        analysis["findings"] = findings
+
+        # Upgrade status from warning to ok if the only issue was these mismatches
+        # (keep current status if there are still other issues)
+
+    return analysis
 
 
 # ---------------------------------------------------------------------------
@@ -1908,6 +2081,42 @@ def render(current_user: dict) -> None:
         "Tickets resumen de transacciones de tarjeta del POS.",
         "neonet",
     )
+
+    # Manual ticket totals (in case papel térmico is illegible)
+    st.markdown(
+        '<div style="margin-top:14px;padding:14px 18px;background:#FAFBFC;'
+        'border:1px dashed #D8DCE2;border-radius:4px;">'
+        '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;'
+        'color:#6C7280;font-weight:600;margin-bottom:4px;">'
+        '🖍 Totales manuales (opcional)</div>'
+        '<div style="font-size:11.5px;color:#6C7280;line-height:1.5;margin-bottom:10px;">'
+        'Si el papel térmico está borroso/ilegible, escribe aquí los totales que tu '
+        'puedes leer del ticket físico. Si los dejas en 0.00, la IA leerá del ticket directamente.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    col_cm, col_vn = st.columns(2)
+    with col_cm:
+        manual_credomatic = st.number_input(
+            "Total CREDOMATIC del ticket (Q)",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            value=float(st.session_state.get("cc_manual_credomatic", 0.0)),
+            key="cc_manual_credomatic",
+            help="Solo llenar si el ticket está parcialmente ilegible y no quieres que la IA adivine.",
+        )
+    with col_vn:
+        manual_visanet = st.number_input(
+            "Total VISANET / NEONET del ticket (Q)",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            value=float(st.session_state.get("cc_manual_visanet", 0.0)),
+            key="cc_manual_visanet",
+            help="Solo llenar si el ticket está parcialmente ilegible y no quieres que la IA adivine.",
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="cc-section">', unsafe_allow_html=True)
@@ -1970,8 +2179,15 @@ def render(current_user: dict) -> None:
                     catalog = cash_history.build_processed_catalog()
                     # Get open pending items
                     pending = cash_history.list_pending(only_open=True)
+                    # Read manual ticket totals (override if illegible papers)
+                    m_credomatic = float(st.session_state.get("cc_manual_credomatic", 0.0))
+                    m_visanet = float(st.session_state.get("cc_manual_visanet", 0.0))
                     # Call Claude with full context
-                    report = _call_claude(pdfs, neonet, boletas, catalog, pending)
+                    report = _call_claude(
+                        pdfs, neonet, boletas, catalog, pending,
+                        manual_credomatic=m_credomatic,
+                        manual_visanet=m_visanet,
+                    )
                     st.session_state.cc_last_report = report
                 except Exception as e:
                     st.error(f"Error durante el análisis: `{e}`")
