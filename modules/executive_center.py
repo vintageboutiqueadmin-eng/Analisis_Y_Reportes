@@ -1488,6 +1488,52 @@ def _render_pending_tab(current_user: dict):
                 except Exception as e:
                     st.error(f"Error: `{e}`")
 
+            st.markdown("---")
+            st.markdown("**3. Cuadrar parejas pendientes por monto (boleta huérfana ↔ depósito sin boleta)**")
+            st.caption(
+                "Escanea la bandeja y busca **parejas** donde una boleta huérfana y "
+                "un depósito sin boleta tienen el **mismo monto** (tolerancia Q 1.00). "
+                "Por cada pareja encontrada, se cuadran automáticamente AMBOS pendientes y se "
+                "actualizan los DOS cierres origen con un finding de trazabilidad. "
+                "Útil cuando se subieron boletas y PDFs en análisis diferentes."
+            )
+            if st.button(
+                "🔗 Cuadrar parejas de pendientes por monto",
+                key="resolve_cross_pairs",
+                use_container_width=True,
+            ):
+                try:
+                    res = cash_history.autoresolve_cross_pending_pairs(
+                        user_email=current_user["email"]
+                    )
+                    if res["pairs_resolved"] == 0:
+                        st.info(
+                            "✓ No se encontraron parejas pendientes que coincidan por monto. "
+                            "La bandeja no tiene pares cuadrables ahora mismo."
+                        )
+                    else:
+                        st.success(
+                            f"✅ Se cuadraron **{res['pairs_resolved']} parejas** "
+                            f"({res['pairs_resolved'] * 2} pendientes resueltos · "
+                            f"{res['reports_updated']} cierre(s) actualizados)."
+                        )
+                        with st.expander("Ver detalle de parejas cuadradas", expanded=True):
+                            for pair in res["pair_details"]:
+                                st.markdown(
+                                    f"&nbsp;&nbsp;🔗 **{pair['missing_pos_ref']}** "
+                                    f"({pair['missing_cashier']}, "
+                                    f"Q {pair['missing_amount']:.2f}) ↔ "
+                                    f"**Boleta J No. {pair['orphan_slip']}** "
+                                    f"(Q {pair['orphan_amount']:.2f})"
+                                )
+                    cash_history.list_pending.clear()
+                    cash_history.list_history.clear()
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+
     if not pending:
         st.markdown(
             '<div class="ce-empty">'
