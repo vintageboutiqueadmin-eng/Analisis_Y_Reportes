@@ -1534,6 +1534,54 @@ def _render_pending_tab(current_user: dict):
                 except Exception as e:
                     st.error(f"Error: `{e}`")
 
+            st.markdown("---")
+            st.markdown("**4. Reparar bug de multi-depósito en cierres del historial**")
+            st.caption(
+                "Repara reportes donde un cierre POS tiene **varios depósitos parciales** "
+                "(ej. Q 1,824 + Q 900) pero la app antigua los sumó como un único depósito "
+                "de Q 2,724 y no encontró boleta de ese monto. Esta utilidad busca "
+                "combinaciones de 2-3 boletas (en el reporte o en pendientes) cuya suma "
+                "cuadre con el depósito faltante, los reconcilia y actualiza ambos lados."
+            )
+            if st.button(
+                "🔧 Reparar bug de multi-depósito en el historial",
+                key="repair_multidep",
+                use_container_width=True,
+            ):
+                try:
+                    res = cash_history.repair_multi_deposit_bug_in_history()
+                    if res["reports_fixed"] == 0:
+                        st.info(
+                            "✓ No se detectaron casos del bug de multi-depósito en el historial. "
+                            "Todos los reportes están limpios."
+                        )
+                    else:
+                        st.success(
+                            f"✅ Reparado: **{res['reports_fixed']} reporte(s)** · "
+                            f"**{res['splits_made']} depósito(s) particionados** · "
+                            f"**{res['pendings_resolved']} pendiente(s) cuadrado(s) automáticamente**."
+                        )
+                        with st.expander("Ver detalle de reparaciones", expanded=True):
+                            for d in res["details"]:
+                                split_str = " + ".join(
+                                    f"J {s['slip']} Q {s['amount']:.2f}" +
+                                    (" 📥" if s["src"] == "pending" else "")
+                                    for s in d["split_into"]
+                                )
+                                st.markdown(
+                                    f"&nbsp;&nbsp;🔧 **{d['missing_pos_ref']}** "
+                                    f"({d['cashier']}, Q {d['missing_amount']:.2f}) → "
+                                    f"{split_str}"
+                                )
+                            st.caption("📥 = boleta venía de bandeja de pendientes")
+                    cash_history.list_pending.clear()
+                    cash_history.list_history.clear()
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+
     if not pending:
         st.markdown(
             '<div class="ce-empty">'
