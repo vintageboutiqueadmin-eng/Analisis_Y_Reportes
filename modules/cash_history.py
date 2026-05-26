@@ -1003,6 +1003,198 @@ def autoresolve_cross_pending_pairs(
     }
 
 
+def repair_multi_deposit_bug_in_history(tolerance: float = 1.0) -> dict:
+    """
+    Detect and repair the "multi-deposit bug" in historical reports.
+
+    The bug: when a single POS closing has MULTIPLE partial deposits (e.g. Q 1,824
+    + Q 900 = Q 2,724), the old prompt summed them and treated as ONE deposit of
+    Q 2,724. Then it failed to match against any single boleta and marked the
+    sum as `missing_slip` (or used wrong matching). Meanwhile, the individual
+    boletas that DO exist (Q 1,824 + Q 900 separately) ended up as `orphan_slips`.
+
+    This function:
+      1. Scans all historical reports
+      2. For each `missing_slip` in a report, looks for COMBINATIONS of `orphan_slips`
+         (same report or in pending tray) that sum to the missing amount
+      3. If a combination of 2-3 orphans sums to the missing amount within
+         tolerance, it splits the missing into the individual deposits and
+         matches each with its orphan
+      4. Updates the report bank_reconciliation accordingly + adds a finding
+      5. Resolves the affected pendings
+
+    Returns dict with stats.
+    """
+    from itertools import combinations
+
+    history = list_history()
+    if not history:
+        return {"reports_fixed": 0, "splits_made": 0, "pendings_resolved": 0, "details": []}
+
+    open_pendings = list_pending(only_open=True)
+    open_orphan_pendings = [p for p in open_pendings if p["type"] == "boleta_huerfana"]
+    open_missing_pendings = [p for p in open_pendings if p["type"] == "deposito_sin_boleta"]
+
+    reports_fixed = 0
+    splits_made = 0
+    pendings_resolved_count = 0
+    details = []
+
+    for h in history:
+        rid = h["id"]
+        data = h.get("json_data") or {}
+        bank = data.get("bank_reconciliation") or {}
+        missing_slips = list(bank.get("missing_slips") or [])
+        orphan_slips = list(bank.get("orphan_slips") or [])
+
+        if not missing_slips:
+            continue
+
+        # Build pool of available orphans: orphans in THIS report + open orphan pendings
+        # We'll track them so we don't double-use
+        local_orphans = [
+            {"src": "local", "ref": (o.get("slip_number") or "").strip(),
+             "amount": float(o.get("amount") or 0), "obj": o}
+            for o in orphan_slips
+        ]
+        pending_orphans = [
+            {"src": "pending", "ref": (p.get("details", {}).get("slip_number") or "").strip(),
+             "amount": float(p.get("amount") or 0), "obj": p}
+            for p in open_orphan_pendings
+        ]
+        available_orphans = local_orphans + pending_orphans
+
+        new_missing_slips = []
+        used_orphan_ids = set()  # track by (src, ref) tuples
+        local_changes = []
+        new_matched = list(bank.get("matched") or [])
+
+        for miss in missing_slips:
+            miss_amt = float(miss.get("amount") or 0)
+            miss_pos = (miss.get("pos_ref") or "").strip()
+            miss_cashier = miss.get("cashier", "")
+
+            if miss_amt <= 0:
+                new_missing_slips.append(miss)
+                continue
+
+            # Try to find a combination of 2-3 orphans that sum to miss_amt
+            usable = [
+                o for o in available_orphans
+                if (o["src"], o["ref"]) not in used_orphan_ids and o["amount"] > 0
+            ]
+
+            found_combo = None
+            # Try combinations of size 2, then 3 (size 1 is the regular matching case)
+            for combo_size in (2, 3):
+                if len(usable) < combo_size:
+                    continue
+                for combo in combinations(usable, combo_size):
+                    total = sum(o["amount"] for o in combo)
+                    if abs(total - miss_amt) <= tolerance:
+                        found_combo = combo
+                        break
+                if found_combo:
+                    break
+
+            if not found_combo:
+                new_missing_slips.append(miss)
+                continue
+
+            # Found a combination! Split the missing into individual deposits matched
+            # with each orphan
+            for o in found_combo:
+                new_matched.append({
+                    "pos_ref": miss_pos,
+                    "pos_amount": o["amount"],
+                    "slip_number": o["ref"],
+                    "slip_amount": o["amount"],
+                    "cashier": miss_cashier,
+                    "rescued_by_multidep_repair": True,
+                    "note": f"Depósito parcial recuperado (parte de Q {miss_amt:.2f})",
+                })
+                used_orphan_ids.add((o["src"], o["ref"]))
+                splits_made += 1
+
+                # If the orphan came from a pending, mark it resolved
+                if o["src"] == "pending":
+                    pid = o["obj"]["id"]
+                    if mark_pending_resolved(pid, f"multidep-repair-auto"):
+                        pendings_resolved_count += 1
+
+            local_changes.append({
+                "report_id": rid,
+                "missing_pos_ref": miss_pos,
+                "missing_amount": miss_amt,
+                "cashier": miss_cashier,
+                "split_into": [
+                    {"slip": o["ref"], "amount": o["amount"], "src": o["src"]}
+                    for o in found_combo
+                ],
+            })
+            details.append(local_changes[-1])
+
+        if not local_changes:
+            continue
+
+        # Update report
+        # Remove orphans we used (only local ones; pending ones are handled by mark_pending_resolved)
+        used_local_refs = {
+            ref for src, ref in used_orphan_ids if src == "local"
+        }
+        new_orphan_slips = [
+            o for o in orphan_slips
+            if (o.get("slip_number") or "").strip() not in used_local_refs
+        ]
+
+        bank["missing_slips"] = new_missing_slips
+        bank["orphan_slips"] = new_orphan_slips
+        bank["matched"] = new_matched
+        data["bank_reconciliation"] = bank
+
+        # Add finding
+        findings = data.get("findings") or []
+        for change in local_changes:
+            split_desc = " + ".join(
+                f"J {s['slip']} Q {s['amount']:.2f}"
+                + (" [de bandeja de pendientes]" if s["src"] == "pending" else "")
+                for s in change["split_into"]
+            )
+            findings.append({
+                "severity": "info",
+                "title": "Reparación de bug multi-depósito",
+                "detail": (
+                    f"El depósito {change['missing_pos_ref']} de {change['cashier']} "
+                    f"(Q {change['missing_amount']:.2f}) fue particionado correctamente "
+                    f"en {len(change['split_into'])} depósitos parciales que cuadran exacto: "
+                    f"{split_desc}. Esto corrige un bug anterior donde múltiples depósitos "
+                    f"parciales en un mismo cierre se sumaban y trataban como uno solo."
+                ),
+            })
+        data["findings"] = findings
+
+        # Upgrade overall_status if all issues are resolved now
+        if data.get("overall_status") in ("warning", "issues"):
+            still_has_issues = (
+                bank.get("missing_slips")
+                or bank.get("orphan_slips")
+                or any(_safe_float(c.get("diferencia_interna")) > 0
+                       for c in (data.get("cashier_breakdown") or []))
+            )
+            if not still_has_issues:
+                data["overall_status"] = "ok"
+
+        if update_report(rid, data):
+            reports_fixed += 1
+
+    return {
+        "reports_fixed": reports_fixed,
+        "splits_made": splits_made,
+        "pendings_resolved": pendings_resolved_count,
+        "details": details,
+    }
+
+
 def resolve_pending_manually(pending_id: str, user_email: str, note: str) -> dict:
     """
     Mark a single pending as resolved without an attached document
