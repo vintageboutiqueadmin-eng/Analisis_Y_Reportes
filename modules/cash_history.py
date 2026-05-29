@@ -1003,6 +1003,280 @@ def autoresolve_cross_pending_pairs(
     }
 
 
+# ===========================================================================
+# REPOSICIÓN: boleta huérfana  ↔  diferencia interna de cierre
+# ---------------------------------------------------------------------------
+# Caso común: un cajero queda corto en el cierre (efectivo cobrado > depósito,
+# `diferencia_interna` > 0 → debe reponer) y al día siguiente deposita ese
+# faltante por separado. Ese depósito genera una boleta de banco que no calza
+# con ningún depósito de venta del POS → se marca huérfana. La boleta y el
+# faltante son el MISMO dinero y deben saldarse entre sí.
+#
+# Una boleta de banco NO trae cajero; el único dato compartido es el MONTO. Por
+# eso, para no cruzar dinero por error, el emparejado automático exige que el
+# monto sea inequívoco (exactamente UNA huérfana y UNA diferencia interna de ese
+# monto). Los montos con varios candidatos quedan para confirmación humana
+# (link_reposicion / linker en la bandeja).
+# ===========================================================================
+
+def _parse_date_loose(s) -> dt.date | None:
+    """Parse a date string in any of the formats used across the app."""
+    if not s:
+        return None
+    s = str(s).strip()
+    for c in (s, s[:10]):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%y"):
+            try:
+                return dt.datetime.strptime(c, fmt).date()
+            except Exception:
+                pass
+    return None
+
+
+def _reposicion_date_ok(slip_date_str: str, close_date_str: str) -> bool:
+    """
+    A reposición deposit cannot predate the close it repays. Returns True unless
+    we can PROVE the slip is earlier than the close (lenient on unparseable dates).
+    """
+    sd = _parse_date_loose(slip_date_str)
+    cd = _parse_date_loose(close_date_str)
+    if sd is None or cd is None:
+        return True
+    return sd >= cd
+
+
+def _reposicion_maybe_upgrade_status(data: dict) -> None:
+    """Upgrade a report from 'warning' to 'ok' if no real issues remain."""
+    if data.get("overall_status") != "warning":
+        return
+    bank = data.get("bank_reconciliation") or {}
+    cashier_diffs = sum(
+        1 for c in (data.get("cashier_breakdown") or [])
+        if _safe_float(c.get("diferencia_interna")) > 0
+    )
+    other_warn = any(
+        f.get("severity") in ("warn", "alert")
+        for f in (data.get("findings") or [])
+    )
+    if (not bank.get("missing_slips") and not bank.get("orphan_slips")
+            and cashier_diffs == 0 and not other_warn):
+        data["overall_status"] = "ok"
+
+
+def _apply_reposicion_link(orph: dict, diff: dict, user_email: str) -> dict | None:
+    """
+    Resolve one (boleta_huerfana ↔ diferencia_interna_cierre) pair as a reposición
+    and update the origin report(s): zero the diferencia_interna on the difference's
+    cierre, drop the orphan slip from the slip's cierre, and add a clear finding.
+    Handles the case where both pendings share the same origin report (one save).
+    Returns a detail dict, or None on failure.
+    """
+    resolver_label = f"reposicion-{user_email}"
+    if not mark_pending_resolved(orph["id"], resolver_label):
+        return None
+    if not mark_pending_resolved(diff["id"], resolver_label):
+        return None
+
+    o_d = orph.get("details", {}) or {}
+    d_d = diff.get("details", {}) or {}
+    slip = o_d.get("slip_number", "")
+    cashier = d_d.get("cashier", "?")
+    diff_pos = d_d.get("pos_ref", "?")
+    amt = _safe_float(diff.get("amount")) or _safe_float(orph.get("amount"))
+
+    orph_origin = orph.get("origin_report_id")
+    diff_origin = diff.get("origin_report_id")
+
+    # Collect the mutations each origin report needs, then save each report ONCE
+    # (the difference and the slip frequently come from the SAME upload).
+    targets: dict[str, list[tuple[str, str]]] = {}
+    if diff_origin:
+        targets.setdefault(diff_origin, []).append(("diff", diff_pos))
+    if orph_origin:
+        targets.setdefault(orph_origin, []).append(("orph", slip))
+
+    origins = set()
+    for oid, muts in targets.items():
+        rep = get_report_by_id(oid)
+        if not rep or not rep.get("json_data"):
+            continue
+        data = rep["json_data"]
+        for kind, key in muts:
+            if kind == "diff":
+                for c in (data.get("cashier_breakdown") or []):
+                    if (c.get("pos_ref") or "") == key:
+                        c["diferencia_interna"] = 0
+                        prev = c.get("notes", "")
+                        add = (
+                            f"[Diferencia repuesta vía depósito bancario — "
+                            f"boleta J No. {slip} (Q {amt:.2f})]"
+                        )
+                        c["notes"] = (prev + " " + add).strip() if prev else add
+            else:  # orph
+                bank = data.get("bank_reconciliation") or {}
+                bank["orphan_slips"] = [
+                    o for o in (bank.get("orphan_slips") or [])
+                    if (o.get("slip_number") or "") != key
+                ]
+                data["bank_reconciliation"] = bank
+
+        findings = data.get("findings") or []
+        findings.append({
+            "severity": "ok",
+            "title": "Reposición conciliada",
+            "detail": (
+                f"El faltante de cierre de {cashier} ({diff_pos}, Q {amt:.2f}) fue "
+                f"repuesto mediante el depósito bancario de la boleta J No. {slip}. "
+                f"Ambos quedan saldados. Conciliado por {user_email}."
+            ),
+        })
+        data["findings"] = findings
+        _reposicion_maybe_upgrade_status(data)
+        if update_report(oid, data):
+            origins.add(oid)
+
+    return {
+        "orphan_id": orph["id"],
+        "diff_id": diff["id"],
+        "slip": slip,
+        "cashier": cashier,
+        "diff_pos": diff_pos,
+        "amount": amt,
+        "origins": origins,
+    }
+
+
+def autoresolve_reposicion_pairs(user_email: str, tolerance: float = 1.0) -> dict:
+    """
+    Scan the open pending tray and auto-link unambiguous reposiciones:
+    a boleta_huerfana and a diferencia_interna_cierre of the SAME amount.
+
+    SAFETY: a bank slip has no cashier, so amount is the only join key. An amount
+    is linked automatically ONLY when it is unique on both sides (exactly one open
+    orphan slip AND one open internal difference of that exact amount) and the slip
+    date is not earlier than the close. Amounts with several candidates on either
+    side are returned in `ambiguous` for manual confirmation in the tray and are
+    left untouched.
+
+    Returns: {pairs_resolved, reports_updated, pair_details, ambiguous}
+    """
+    open_pendings = list_pending(only_open=True)
+    orphans = [p for p in open_pendings if p["type"] == "boleta_huerfana"]
+    diffs = [p for p in open_pendings if p["type"] == "diferencia_interna_cierre"]
+
+    if not orphans or not diffs:
+        return {"pairs_resolved": 0, "reports_updated": 0,
+                "pair_details": [], "ambiguous": []}
+
+    from collections import defaultdict
+
+    def _k(amt):
+        return round(_safe_float(amt), 2)
+
+    orph_by_amt: dict[float, list[dict]] = defaultdict(list)
+    for o in orphans:
+        orph_by_amt[_k(o["amount"])].append(o)
+    diff_by_amt: dict[float, list[dict]] = defaultdict(list)
+    for dpd in diffs:
+        diff_by_amt[_k(dpd["amount"])].append(dpd)
+
+    pair_details = []
+    ambiguous = []
+    updated_origins = set()
+
+    for amt, o_list in orph_by_amt.items():
+        if amt <= 0:
+            continue
+        d_list = diff_by_amt.get(amt, [])
+        if not d_list:
+            continue
+        if len(o_list) == 1 and len(d_list) == 1:
+            orph, diff = o_list[0], d_list[0]
+            slip_date = (orph.get("details") or {}).get("date", "")
+            if not _reposicion_date_ok(slip_date, diff.get("origin_date", "")):
+                ambiguous.append({
+                    "amount": amt, "orphan_count": 1, "diff_count": 1,
+                    "reason": "fecha de boleta anterior al cierre",
+                })
+                continue
+            detail = _apply_reposicion_link(orph, diff, user_email)
+            if detail:
+                pair_details.append(detail)
+                updated_origins.update(detail["origins"])
+        else:
+            ambiguous.append({
+                "amount": amt,
+                "orphan_count": len(o_list),
+                "diff_count": len(d_list),
+                "reason": "varios candidatos del mismo monto",
+            })
+
+    return {
+        "pairs_resolved": len(pair_details),
+        "reports_updated": len(updated_origins),
+        "pair_details": pair_details,
+        "ambiguous": ambiguous,
+    }
+
+
+def find_reposicion_candidates(pending: dict, tolerance: float = 1.0) -> list[dict]:
+    """
+    Given an open boleta_huerfana OR diferencia_interna_cierre, return the open
+    pendings of the OPPOSITE type whose amount matches (within tolerance) and whose
+    dates are consistent with a reposición. Powers the inline linker in the tray.
+    """
+    ptype = pending.get("type")
+    if ptype == "boleta_huerfana":
+        opp = "diferencia_interna_cierre"
+    elif ptype == "diferencia_interna_cierre":
+        opp = "boleta_huerfana"
+    else:
+        return []
+
+    amt = _safe_float(pending.get("amount"))
+    out = []
+    for c in list_pending(only_open=True):
+        if c["type"] != opp or c["id"] == pending.get("id"):
+            continue
+        if abs(_safe_float(c.get("amount")) - amt) > tolerance:
+            continue
+        if ptype == "boleta_huerfana":
+            slip_date = (pending.get("details") or {}).get("date", "")
+            close_date = c.get("origin_date", "")
+        else:
+            slip_date = (c.get("details") or {}).get("date", "")
+            close_date = pending.get("origin_date", "")
+        if not _reposicion_date_ok(slip_date, close_date):
+            continue
+        out.append(c)
+    return out
+
+
+def link_reposicion(orphan_id: str, diff_id: str, user_email: str) -> dict:
+    """
+    Explicitly link one orphan slip to one internal difference as a reposición
+    (used by the inline linker for the ambiguous / manual case).
+    Returns: {linked, reports_updated, slip, cashier, amount}
+    """
+    full = list_pending(only_open=True)
+    orph = next((p for p in full
+                 if p["id"] == orphan_id and p["type"] == "boleta_huerfana"), None)
+    diff = next((p for p in full
+                 if p["id"] == diff_id and p["type"] == "diferencia_interna_cierre"), None)
+    if not orph or not diff:
+        return {"linked": 0, "reports_updated": 0}
+    detail = _apply_reposicion_link(orph, diff, user_email)
+    if not detail:
+        return {"linked": 0, "reports_updated": 0}
+    return {
+        "linked": 1,
+        "reports_updated": len(detail["origins"]),
+        "slip": detail["slip"],
+        "cashier": detail["cashier"],
+        "amount": detail["amount"],
+    }
+
+
 def repair_multi_deposit_bug_in_history(tolerance: float = 1.0) -> dict:
     """
     Detect and repair the "multi-deposit bug" in historical reports.
