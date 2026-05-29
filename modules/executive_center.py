@@ -816,6 +816,15 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
         with st.expander(label, expanded=False):
             _render_inline_resolver(p, row_type, all_open_same_type, current_user)
 
+    # Reposición linker — only shown when a matching counterpart exists in the tray
+    if row_type in ("boleta_huerfana", "diferencia_interna_cierre"):
+        if cash_history.find_reposicion_candidates(p):
+            with st.expander(
+                "🔁 Vincular como reposición (faltante repuesto con depósito)",
+                expanded=False,
+            ):
+                _render_reposicion_linker(p, row_type, current_user)
+
     # Compensation expander — always available as a manual override
     with st.expander("⚖️ Compensación manual (sin documento)", expanded=False):
         _render_compensation_form(p, current_user)
@@ -916,6 +925,83 @@ def _render_compensation_form(p: dict, current_user: dict) -> None:
                 st.rerun()
             else:
                 st.error("No se pudo aplicar la compensación. Recarga la página.")
+        except Exception as e:
+            st.error(f"Error: `{e}`")
+
+
+def _render_reposicion_linker(p: dict, row_type: str, current_user: dict) -> None:
+    """
+    Link an orphan slip to an internal difference (or vice-versa) as a reposición:
+    the cashier was short at close and deposited the missing amount separately, so
+    the bank slip and the shortage are the same money and cancel out.
+    """
+    candidates = cash_history.find_reposicion_candidates(p)
+    if not candidates:
+        return
+
+    st.markdown(
+        "<div style='background:#EAF2FB;border-left:3px solid #2563EB;"
+        "padding:10px 14px;border-radius:4px;margin-bottom:12px;"
+        "font-size:12px;color:#3D4554;line-height:1.6;'>"
+        "Usa esto cuando este faltante se repuso con un <strong>depósito bancario "
+        "aparte</strong> (el cajero depositó el dinero que le faltaba). Al vincular, "
+        "la boleta y el faltante se saldan entre sí y ambos pendientes se cierran. "
+        "Una boleta de banco no trae el nombre del cajero, así que confirma que el "
+        "monto y la fecha correspondan antes de vincular."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    def _label(c: dict) -> str:
+        d = c.get("details", {}) or {}
+        if c["type"] == "boleta_huerfana":
+            return (f"🧾 Boleta J No. {d.get('slip_number', '?')} · "
+                    f"{_fmt_q(c['amount'])} (del {d.get('date', '?')})")
+        return (f"⚖️ {d.get('cashier', '?')} · {d.get('pos_ref', '?')} · "
+                f"{_fmt_q(c['amount'])} (faltante del {c.get('origin_date', '?')})")
+
+    options = {_label(c): c for c in candidates}
+    counterpart_word = (
+        "boleta de reposición" if row_type == "diferencia_interna_cierre"
+        else "diferencia interna (faltante)"
+    )
+    choice = st.selectbox(
+        f"Vincular con la {counterpart_word} correspondiente:",
+        list(options.keys()),
+        key=f"repo_sel_{p['id']}",
+    )
+
+    if st.button(
+        "🔁 Vincular como reposición y cerrar ambos",
+        key=f"repo_link_{p['id']}",
+        type="primary",
+        use_container_width=True,
+    ):
+        chosen = options[choice]
+        if row_type == "boleta_huerfana":
+            orphan_id, diff_id = p["id"], chosen["id"]
+        else:
+            orphan_id, diff_id = chosen["id"], p["id"]
+        try:
+            res = cash_history.link_reposicion(
+                orphan_id=orphan_id,
+                diff_id=diff_id,
+                user_email=current_user["email"],
+            )
+            if res["linked"]:
+                st.success(
+                    f"✅ Reposición vinculada · la boleta J No. {res['slip']} salda el "
+                    f"faltante de {res['cashier']} (Q {res['amount']:.2f}). "
+                    f"Ambos pendientes cerrados · {res['reports_updated']} cierre(s) "
+                    f"actualizados. La página se recargará."
+                )
+                cash_history.list_pending.clear()
+                cash_history.list_history.clear()
+                import time
+                time.sleep(1.5)
+                st.rerun()
+            else:
+                st.error("No se pudo vincular. Recarga la página e intenta de nuevo.")
         except Exception as e:
             st.error(f"Error: `{e}`")
 
@@ -1574,6 +1660,67 @@ def _render_pending_tab(current_user: dict):
                                     f"{split_str}"
                                 )
                             st.caption("📥 = boleta venía de bandeja de pendientes")
+                    cash_history.list_pending.clear()
+                    cash_history.list_history.clear()
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+
+            st.markdown("---")
+            st.markdown("**5. Cuadrar reposiciones por monto (boleta huérfana ↔ diferencia interna)**")
+            st.caption(
+                "Para el caso común: un cajero quedó corto en su cierre (diferencia "
+                "interna) y depositó ese faltante por separado — esa boleta queda "
+                "huérfana. Esta utilidad busca parejas **boleta huérfana ↔ diferencia "
+                "interna del mismo monto** y las salda automáticamente, pero SOLO cuando "
+                "el monto es inequívoco (una sola boleta y un solo faltante de ese monto). "
+                "Si hay varios del mismo monto, no adivina: usa **🔁 Vincular como "
+                "reposición** dentro de cada pendiente para confirmar a mano."
+            )
+            if st.button(
+                "🔁 Cuadrar reposiciones por monto",
+                key="resolve_reposiciones",
+                use_container_width=True,
+            ):
+                try:
+                    res = cash_history.autoresolve_reposicion_pairs(
+                        user_email=current_user["email"]
+                    )
+                    if res["pairs_resolved"] == 0 and not res["ambiguous"]:
+                        st.info(
+                            "✓ No se encontraron reposiciones cuadrables. No hay una "
+                            "boleta huérfana que coincida por monto con una diferencia interna."
+                        )
+                    else:
+                        if res["pairs_resolved"] > 0:
+                            st.success(
+                                f"✅ Se cuadraron **{res['pairs_resolved']} reposición(es)** "
+                                f"({res['pairs_resolved'] * 2} pendientes resueltos · "
+                                f"{res['reports_updated']} cierre(s) actualizados)."
+                            )
+                            with st.expander("Ver detalle de reposiciones cuadradas", expanded=True):
+                                for d in res["pair_details"]:
+                                    st.markdown(
+                                        f"&nbsp;&nbsp;🔁 **{d['cashier']}** "
+                                        f"({d['diff_pos']}, Q {d['amount']:.2f}) ↔ "
+                                        f"**Boleta J No. {d['slip']}**"
+                                    )
+                        if res["ambiguous"]:
+                            st.warning(
+                                f"⚠ {len(res['ambiguous'])} monto(s) con varios candidatos NO "
+                                f"se cuadraron automáticamente (no se puede saber qué boleta repone "
+                                f"a qué cajero). Resuélvelos a mano con **🔁 Vincular como "
+                                f"reposición** dentro del pendiente:"
+                            )
+                            for a in res["ambiguous"]:
+                                st.markdown(
+                                    f"&nbsp;&nbsp;• Q {a['amount']:.2f} — "
+                                    f"{a['orphan_count']} boleta(s) huérfana(s), "
+                                    f"{a['diff_count']} diferencia(s) interna(s) "
+                                    f"({a.get('reason', '')})"
+                                )
                     cash_history.list_pending.clear()
                     cash_history.list_history.clear()
                     import time
