@@ -541,6 +541,10 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
 
 **REGLA #5 — Diferencias internas de PDF deben reportarse SIEMPRE.** Si un PDF muestra "Diferencia: Q X.XX" donde X > 0 (efectivo cobrado ≠ depósito realizado), reporta `diferencia_interna: X.XX` en el `cashier_breakdown` correspondiente. Estas diferencias representan dinero que el cajero debe reponer.
 
+**REGLA #5.5 — REPOSICIÓN DE UN FALTANTE (no es un error).** Caso común y recurrente: un cajero queda corto en su cierre (REGLA #5, `diferencia_interna` > 0) y deposita ESE faltante por separado, casi siempre al día siguiente. Por eso es NORMAL y esperado ver, en el mismo upload, una boleta de banco cuyo monto = una diferencia interna y que no cuadra con ningún depósito de venta del POS.
+   - Reporta la diferencia interna normalmente en el `cashier_breakdown` (REGLA #5) **Y** la boleta normalmente en `orphan_slips` (REGLA #1).
+   - NO fuerces el match tú, NO muevas la boleta a `matched`, NO borres ninguno de los dos y NO inventes boletas (REGLA #0 y #0.5 siguen aplicando). El sistema concilia la reposición automáticamente después de tu análisis cuando el monto coincide de forma inequívoca.
+
 **REGLA #6 — TOTALES MANUALES DE TICKETS DE TARJETAS.** Si en el contexto que te paso encuentras un campo `manual_credomatic_total` o `manual_visanet_total` con un valor > 0, ese es el total real del ticket físico (escrito a mano por el Lic. porque el papel estaba ilegible). En ese caso:
    - Usa ese valor como `ticket_total` en `card_reconciliation`.
    - NO intentes leer el total del ticket de la imagen (el papel térmico está borroso).
@@ -1016,6 +1020,8 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
 
     # SAFETY NET: post-process to catch any missing/orphan that should have matched
     parsed = _autoresolve_missed_matches(parsed)
+    # SAFETY NET: pair same-upload reposiciones (orphan slip ↔ internal difference)
+    parsed = _autoresolve_reposiciones(parsed)
     return parsed
 
 
@@ -1124,6 +1130,99 @@ def _autoresolve_missed_matches(analysis: dict, tolerance: float = 1.0) -> dict:
         # Upgrade status from warning to ok if the only issue was these mismatches
         # (keep current status if there are still other issues)
 
+    return analysis
+
+
+def _autoresolve_reposiciones(analysis: dict, tolerance: float = 1.0) -> dict:
+    """
+    Deterministic safety net (runs AFTER Claude) for the 'reposición' case.
+
+    A cashier short at close has `diferencia_interna` > 0 (efectivo cobrado >
+    depósito → debe reponer). If they deposit that exact amount separately in the
+    SAME upload, the deposit shows up as an orphan bank slip (no matching POS
+    deposit). The slip and the difference are the SAME money.
+
+    When an orphan slip's amount EXACTLY equals an internal difference's amount AND
+    that amount is unambiguous within this upload (exactly one orphan and one
+    difference of that amount), they are paired here: the orphan is dropped from
+    orphan_slips and the diferencia_interna is zeroed, so the upload nets out
+    instead of spawning two pendings that are really one Q-for-Q reposición.
+
+    A bank slip carries no cashier, so amount is the only join key — hence the
+    unique-amount requirement. Ambiguous amounts (several orphans/differences of
+    the same value) are left untouched and handled later in the tray
+    (cash_history.autoresolve_reposicion_pairs / link_reposicion), where a human
+    confirms which slip repays which cashier.
+
+    Returns the (possibly modified) analysis dict.
+    """
+    bank = analysis.get("bank_reconciliation") or {}
+    orphans = list(bank.get("orphan_slips") or [])
+    breakdown = analysis.get("cashier_breakdown") or []
+
+    def _f(v):
+        try:
+            return round(float(v if v not in (None, "") else 0), 2)
+        except Exception:
+            return 0.0
+
+    diff_entries = [c for c in breakdown if _f(c.get("diferencia_interna")) > 0]
+    if not orphans or not diff_entries:
+        return analysis
+
+    from collections import defaultdict
+    orph_by_amt = defaultdict(list)
+    for o in orphans:
+        orph_by_amt[_f(o.get("amount"))].append(o)
+    diff_by_amt = defaultdict(list)
+    for c in diff_entries:
+        diff_by_amt[_f(c.get("diferencia_interna"))].append(c)
+
+    removed_slips = set()
+    paired_log = []
+
+    for amt, o_list in orph_by_amt.items():
+        if amt <= 0:
+            continue
+        d_list = diff_by_amt.get(amt, [])
+        # Only auto-pair when unambiguous: exactly one of each at this amount.
+        if len(o_list) == 1 and len(d_list) == 1:
+            orph, diff = o_list[0], d_list[0]
+            slip = (orph.get("slip_number") or "").strip()
+            diff["diferencia_interna"] = 0
+            prev = diff.get("notes", "")
+            add = (
+                f"[Repuesta en el mismo cierre vía depósito bancario — "
+                f"boleta J No. {slip} (Q {amt:.2f})]"
+            )
+            diff["notes"] = (prev + " " + add).strip() if prev else add
+            removed_slips.add(slip)
+            paired_log.append(
+                f"{diff.get('cashier', '?')} ({diff.get('pos_ref', '?')}) "
+                f"Q {amt:.2f} ↔ boleta {slip}"
+            )
+
+    if not paired_log:
+        return analysis
+
+    bank["orphan_slips"] = [
+        o for o in orphans
+        if (o.get("slip_number") or "").strip() not in removed_slips
+    ]
+    analysis["bank_reconciliation"] = bank
+
+    findings = analysis.get("findings") or []
+    findings.append({
+        "severity": "info",
+        "title": f"Reposición detectada en el mismo cierre: {len(paired_log)} caso(s)",
+        "detail": (
+            "Un faltante de cierre fue repuesto con un depósito bancario en el "
+            "mismo análisis. La boleta y el faltante se saldaron entre sí (no van "
+            "a la bandeja de pendientes):\n"
+            + "\n".join(f"  • {x}" for x in paired_log)
+        ),
+    })
+    analysis["findings"] = findings
     return analysis
 
 
