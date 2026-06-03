@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
+import unicodedata
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -316,6 +318,147 @@ def add_pending(pending_type: str, amount: float, origin_report_id: str,
     return pid
 
 
+# ===========================================================================
+# NETTING DE DIFERENCIAS INTERNAS POR CAJERO-DÍA (varias cajas del mismo cajero)
+# ===========================================================================
+# Cuando Odoo abre VARIAS cajas para el MISMO cajero el MISMO día (p.ej. una caja
+# se traba y se genera un cierre "(RESCATE DE POS/...)"), cada sesión reporta su
+# propia diferencia interna (efectivo cobrado − depósito). Esas diferencias son el
+# MISMO dinero físico repartido entre sesiones: el faltante de una sesión se
+# compensa con el sobrante (depósito de más) de otra. La diferencia REAL del cajero
+# ese día es el NETO de todas sus sesiones, no la suma de los faltantes positivos.
+#
+# Caso real (Sexta Ana Gabriela Alfaro, 29/05 — Odoo abrió 3 cajas):
+#   POS/7570  ef 818  dep 800  → +18 (faltante)
+#   POS/7573  ef  88  dep   0  → +88 (faltante)   (RESCATE de 7570)
+#   POS/7574  ef   0  dep 106  → −106 (sobrante)
+#   NETO = +18 +88 −106 = 0  →  la cajera NO debe reponer nada.
+#
+# La agrupación es por (cajero, tienda, FECHA del número POS). La fecha sale del
+# pos_ref "POS/AAAA/MM/DD/NNNN" — NO del report_date — porque un mismo reporte puede
+# contener cierres de varios días (p.ej. el cierre del 16/05 traía 15, 16 y 17). Así
+# nunca se mezclan sesiones de días distintos.
+# ===========================================================================
+
+def _norm_cashier(name) -> str:
+    """Normaliza nombre de cajero para agrupar: minúsculas, sin acentos, sin espacios extra."""
+    s = str(name or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(s.split())
+
+
+def _pos_date(pos_ref, fallback: str = "") -> str:
+    """Extrae AAAA-MM-DD del número POS ('POS/2026/05/29/7570'). Usa fallback si no hay."""
+    m = re.search(r"POS/(\d{4})/(\d{2})/(\d{2})/", str(pos_ref or ""))
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return str(fallback or "")[:10]
+
+
+def _rescate_parent(pos_ref) -> str:
+    """Si el pos_ref es un cierre RESCATE, devuelve el pos_ref padre; si no, ''."""
+    m = re.search(r"RESCATE DE\s+([^)]+)", str(pos_ref or ""), flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _group_cashier_day_sessions(breakdown: list, report_date_fallback: str = "") -> list:
+    """
+    Agrupa las entradas de cashier_breakdown por (cajero normalizado, tienda, fecha
+    del POS). Devuelve una lista de grupos; cada grupo trae sus sesiones, el conteo,
+    el NETO (Σ efectivo − Σ depósito) y los pos_refs.
+    """
+    groups: dict = {}
+    order: list = []
+    for c in (breakdown or []):
+        key = (
+            _norm_cashier(c.get("cashier")),
+            str(c.get("store") or "").strip(),
+            _pos_date(c.get("pos_ref"), report_date_fallback),
+        )
+        if key not in groups:
+            groups[key] = {"cashier": c.get("cashier") or "",
+                           "store": c.get("store") or "",
+                           "date": key[2],
+                           "sessions": []}
+            order.append(key)
+        ef = _safe_float(c.get("efectivo"))
+        dep = _safe_float(c.get("deposito"))
+        field_diff = _safe_float(c.get("diferencia_interna"))
+        # 'signed' = diferencia firmada de la sesión. Usa efectivo−depósito cuando hay
+        # montos; si la sesión no trae montos, cae al campo diferencia_interna.
+        signed = round(ef - dep, 2) if (ef or dep) else round(field_diff, 2)
+        groups[key]["sessions"].append({
+            "pos_ref": c.get("pos_ref") or "",
+            "efectivo": ef, "deposito": dep,
+            "field_diff": field_diff, "signed": signed,
+            "rescate_parent": _rescate_parent(c.get("pos_ref")),
+            "notes": c.get("notes") or "",
+        })
+
+    out = []
+    for key in order:
+        g = groups[key]
+        sess = g["sessions"]
+        out.append({
+            "cashier": g["cashier"], "store": g["store"], "date": g["date"],
+            "sessions": sess, "n": len(sess),
+            "net": round(sum(s["signed"] for s in sess), 2),
+            "pos_refs": [s["pos_ref"] for s in sess],
+        })
+    return out
+
+
+def _net_faltantes_for_breakdown(breakdown: list, tolerance: float = 1.0,
+                                 report_date_fallback: str = "",
+                                 single_use_computed: bool = False) -> list:
+    """
+    Faltantes REALES que deben existir como pendientes 'diferencia_interna_cierre'
+    para un reporte, ya netados por cajero-día.
+
+    - Cajero con 1 sesión ese día → comportamiento histórico (faltante por sesión).
+      Si single_use_computed=True también calcula efectivo−depósito (como el backfill).
+    - Cajero con VARIAS sesiones el mismo día → se neta Σ(efectivo−depósito). Solo si
+      el NETO > tolerancia se genera UN faltante (por el neto), atribuido a la sesión
+      con mayor faltante. Si el neto ≤ tolerancia (cuadra o queda sobrante), NINGUNO.
+    """
+    result = []
+    for g in _group_cashier_day_sessions(breakdown, report_date_fallback):
+        sess = g["sessions"]
+        if g["n"] <= 1:
+            s = sess[0]
+            diff = s["field_diff"]
+            if single_use_computed and diff <= 0 and s["efectivo"] > 0 and s["deposito"] > 0:
+                if (s["efectivo"] - s["deposito"]) > 0.01:
+                    diff = round(s["efectivo"] - s["deposito"], 2)
+            if diff > 0:
+                result.append({
+                    "amount": round(diff, 2), "pos_ref": s["pos_ref"],
+                    "cashier": g["cashier"], "store": g["store"],
+                    "note": s["notes"], "multi": False,
+                    "group_pos_refs": [s["pos_ref"]],
+                })
+            continue
+        # Multi-sesión el mismo día → netar
+        net = g["net"]
+        if net <= tolerance:
+            continue  # cuadra neto o queda sobrante → no es faltante a reponer
+        rep = max(sess, key=lambda x: x["signed"])
+        desc = ", ".join(
+            f"{s['pos_ref']} ({'+' if s['signed'] >= 0 else ''}{s['signed']:.2f})"
+            for s in sess
+        )
+        result.append({
+            "amount": round(net, 2), "pos_ref": rep["pos_ref"],
+            "cashier": g["cashier"], "store": g["store"],
+            "note": (f"Faltante NETO de {g['n']} cierres del mismo cajero el "
+                     f"{g['date']} (Odoo abrió varias cajas): {desc}. "
+                     f"Neto a reponer Q {net:.2f}."),
+            "multi": True, "group_pos_refs": list(g["pos_refs"]),
+        })
+    return result
+
+
 def add_pending_from_report(report: dict, report_id: str) -> dict:
     """
     Given a completed analysis report, push missing_slips, orphan_slips, and
@@ -361,22 +504,27 @@ def add_pending_from_report(report: dict, report_id: str) -> dict:
         )
         added += 1
 
-    # cashier_breakdown[i].diferencia_interna > 0 → diferencia_interna_cierre
-    for c in (report.get("cashier_breakdown") or []):
-        diff = _safe_float(c.get("diferencia_interna"))
-        if diff <= 0:
-            continue
+    # cashier_breakdown → diferencia_interna_cierre, NETADO por cajero-día.
+    # Varias cajas del mismo cajero el mismo día se compensan entre sí; solo el neto
+    # (Σ efectivo − Σ depósito) es un faltante real. Ver _net_faltantes_for_breakdown.
+    for f in _net_faltantes_for_breakdown(
+        report.get("cashier_breakdown") or [],
+        report_date_fallback=report_date,
+    ):
+        details = {
+            "pos_ref": f["pos_ref"],
+            "cashier": f["cashier"],
+            "store": f["store"],
+            "note": f["note"],
+        }
+        if f.get("multi"):
+            details["grupo_pos_refs"] = f["group_pos_refs"]
         add_pending(
             pending_type="diferencia_interna_cierre",
-            amount=diff,
+            amount=f["amount"],
             origin_report_id=report_id,
             origin_date=report_date,
-            details={
-                "pos_ref": c.get("pos_ref", ""),
-                "cashier": c.get("cashier", ""),
-                "store": c.get("store", ""),
-                "note": c.get("notes", ""),
-            },
+            details=details,
         )
         added += 1
         internal_diffs_count += 1
@@ -569,10 +717,11 @@ def backfill_internal_diffs_from_history() -> dict:
     Scan ALL historical reports and ensure every cashier with a real internal
     diff has a corresponding pending row in cierres_pendientes.
 
-    Detects internal diffs in two ways:
-      1) cashier_breakdown[i].diferencia_interna > 0 (new field, post-fix)
-      2) efectivo - deposito > 0.01 (computed, catches old reports where the
-         AI didn't fill diferencia_interna but the values are visible)
+    Internal diffs are NETTED per cashier-day: when one cashier had several POS
+    sessions the same day (Odoo opened several boxes / RESCATE close), the faltantes
+    of some sessions cancel out against the sobrante of another. Only the NET is a
+    real faltante. Single-session days keep the historic behaviour (field value, or
+    computed efectivo − deposito for old reports). See _net_faltantes_for_breakdown.
 
     Skips ones that already exist (matched by origin_report_id + pos_ref + amount).
 
@@ -597,38 +746,188 @@ def backfill_internal_diffs_from_history() -> dict:
     for h in list_history():
         rid = h["id"]
         data = h.get("json_data") or {}
-        report_date = h.get("report_date") or ""
-        for c in (data.get("cashier_breakdown") or []):
-            scanned += 1
-            # Try field first
-            diff = _safe_float(c.get("diferencia_interna"))
-            # Fallback: compute from efectivo - deposito
-            if diff <= 0:
-                efectivo = _safe_float(c.get("efectivo"))
-                deposito = _safe_float(c.get("deposito"))
-                if efectivo > 0 and deposito > 0 and (efectivo - deposito) > 0.01:
-                    diff = round(efectivo - deposito, 2)
-            if diff <= 0:
-                continue
-            sig = (rid, c.get("pos_ref", ""), round(diff, 2))
+        report_date = str(h.get("report_date") or "")
+        scanned += len(data.get("cashier_breakdown") or [])
+        for f in _net_faltantes_for_breakdown(
+            data.get("cashier_breakdown") or [],
+            report_date_fallback=report_date,
+            single_use_computed=True,
+        ):
+            sig = (rid, f["pos_ref"], round(f["amount"], 2))
             if sig in existing:
                 continue
+            details = {
+                "pos_ref": f["pos_ref"],
+                "cashier": f["cashier"],
+                "store": f["store"],
+                "note": (f["note"] + " [detectado por backfill]").strip(),
+            }
+            if f.get("multi"):
+                details["grupo_pos_refs"] = f["group_pos_refs"]
             add_pending(
                 pending_type="diferencia_interna_cierre",
-                amount=diff,
+                amount=f["amount"],
                 origin_report_id=rid,
                 origin_date=report_date,
-                details={
-                    "pos_ref": c.get("pos_ref", ""),
-                    "cashier": c.get("cashier", ""),
-                    "store": c.get("store", ""),
-                    "note": c.get("notes", "") + " [detectado por backfill]",
-                },
+                details=details,
             )
             existing.add(sig)
             added += 1
 
     return {"scanned": scanned, "added": added}
+
+
+def repair_multisession_internal_diffs(user_email: str, tolerance: float = 1.0) -> dict:
+    """
+    Repara reportes donde un MISMO cajero tuvo VARIOS cierres el MISMO día (Odoo
+    abrió varias cajas / cierre RESCATE) y el sistema dejó faltantes por sesión sin
+    netar contra el sobrante (depósito de más) de otra sesión.
+
+    Para cada grupo (cajero, tienda, fecha del POS) con ≥2 sesiones:
+      - Calcula el NETO (Σ efectivo − Σ depósito).
+      - Cierra los pendientes 'diferencia_interna_cierre' ABIERTOS de ese grupo que no
+        correspondan al neto (faltantes por sesión espurios).
+      - Si el neto > tolerancia, deja UN solo pendiente por el neto; si el neto ≤
+        tolerancia (cuadra o queda sobrante), no deja ninguno.
+      - En el reporte pone en 0 las diferencias por sesión del grupo (y el neto en la
+        sesión con mayor faltante, si aplica) y agrega un finding de auditoría.
+
+    Es idempotente: corrida dos veces no vuelve a tocar nada. Devuelve un resumen.
+    """
+    resolver = f"netting-multisesion-{user_email}"
+    open_pendings = list_pending(only_open=True)
+    scanned_reports = 0
+    groups_fixed = 0
+    pendings_closed = 0
+    residuals_created = 0
+    details_out = []
+
+    for h in list_history():
+        rid = h["id"]
+        report_date = str(h.get("report_date") or "")
+        # Copia desacoplada del caché antes de mutar
+        data = json.loads(json.dumps(h.get("json_data") or {}))
+        breakdown = data.get("cashier_breakdown") or []
+        scanned_reports += 1
+        report_changed = False
+
+        for g in _group_cashier_day_sessions(breakdown, report_date_fallback=report_date):
+            if g["n"] < 2:
+                continue
+            net = g["net"]
+            pos_set = set(g["pos_refs"])
+
+            grp_pendings = [
+                p for p in open_pendings
+                if p["type"] == "diferencia_interna_cierre"
+                and p.get("origin_report_id") == rid
+                and ((p.get("details", {}) or {}).get("pos_ref", "") in pos_set)
+            ]
+
+            should_amt = round(net, 2) if net > tolerance else 0.0
+            current_sum = round(sum(_safe_float(p["amount"]) for p in grp_pendings), 2)
+
+            # ¿Ya está correcto? (ninguno si neto≤tol, o uno solo == neto)
+            already_ok = (
+                (should_amt == 0.0 and not grp_pendings)
+                or (should_amt > 0 and len(grp_pendings) == 1
+                    and abs(current_sum - should_amt) <= 0.01)
+            )
+            if already_ok:
+                continue
+
+            # ---- Reparar este grupo ----
+            for p in grp_pendings:
+                if mark_pending_resolved(p["id"], resolver):
+                    pendings_closed += 1
+            closed_ids = {p["id"] for p in grp_pendings}
+            open_pendings = [p for p in open_pendings if p["id"] not in closed_ids]
+
+            rep_sess = max(g["sessions"], key=lambda x: x["signed"])
+            rep_pos = rep_sess["pos_ref"] if should_amt > 0 else ""
+
+            if should_amt > 0:
+                add_pending(
+                    pending_type="diferencia_interna_cierre",
+                    amount=should_amt,
+                    origin_report_id=rid,
+                    origin_date=report_date,
+                    details={
+                        "pos_ref": rep_pos,
+                        "cashier": g["cashier"],
+                        "store": g["store"],
+                        "note": (f"Faltante NETO de {g['n']} cierres del mismo cajero "
+                                 f"el {g['date']}. Neto a reponer Q {should_amt:.2f}."),
+                        "grupo_pos_refs": list(g["pos_refs"]),
+                    },
+                )
+                residuals_created += 1
+
+            # Ajustar el breakdown del reporte
+            for c in breakdown:
+                if (c.get("pos_ref") or "") in pos_set:
+                    c["diferencia_interna"] = should_amt if (
+                        should_amt > 0 and (c.get("pos_ref") or "") == rep_pos) else 0
+                    prev = c.get("notes", "")
+                    tag = "[Netado por multi-sesión del cajero el mismo día]"
+                    if tag not in prev:
+                        c["notes"] = (prev + " " + tag).strip() if prev else tag
+
+            desc = ", ".join(
+                f"{s['pos_ref']} ({'+' if s['signed'] >= 0 else ''}{s['signed']:.2f})"
+                for s in g["sessions"]
+            )
+            rescate_links = [
+                f"{s['pos_ref']} es RESCATE de {s['rescate_parent']}"
+                for s in g["sessions"] if s.get("rescate_parent")
+            ]
+            if should_amt > 0:
+                txt = (f"{g['cashier']} ({g['store']}) tuvo {g['n']} cierres el "
+                       f"{g['date']} ({desc}). Netados, queda un faltante real de "
+                       f"Q {should_amt:.2f}; se cerraron los faltantes por sesión. ")
+            else:
+                txt = (f"{g['cashier']} ({g['store']}) tuvo {g['n']} cierres el "
+                       f"{g['date']} ({desc}). El neto cuadra (Q {net:.2f}): los "
+                       f"faltantes de unas sesiones se compensan con el sobrante de "
+                       f"otra. No hay nada que reponer; se cerraron los faltantes "
+                       f"por sesión. ")
+            if rescate_links:
+                txt += " ".join(rescate_links) + ". "
+            txt += f"Conciliado por {user_email}."
+            findings = data.get("findings") or []
+            findings.append({
+                "severity": "ok",
+                "title": "Cierres multi-sesión netados",
+                "detail": txt,
+            })
+            data["findings"] = findings
+            _reposicion_maybe_upgrade_status(data)
+
+            report_changed = True
+            groups_fixed += 1
+            details_out.append({
+                "report_id": rid,
+                "cashier": g["cashier"],
+                "store": g["store"],
+                "date": g["date"],
+                "pos_refs": list(g["pos_refs"]),
+                "net": net,
+                "closed": len(grp_pendings),
+                "residual": should_amt,
+            })
+
+        if report_changed:
+            update_report(rid, data)
+
+    list_pending.clear()
+    list_history.clear()
+    return {
+        "scanned_reports": scanned_reports,
+        "groups_fixed": groups_fixed,
+        "pendings_closed": pendings_closed,
+        "residuals_created": residuals_created,
+        "details": details_out,
+    }
 
 
 def repair_suspicious_matches_in_history(tolerance: float = 1.0) -> dict:
