@@ -1729,6 +1729,66 @@ def _render_pending_tab(current_user: dict):
                 except Exception as e:
                     st.error(f"Error: `{e}`")
 
+            st.markdown("---")
+            st.markdown("**6. Netear cierres multi-sesión del mismo cajero (cajas múltiples / RESCATE)**")
+            st.caption(
+                "Para cuando Odoo le abre VARIAS cajas al mismo cajero el mismo día "
+                "(p.ej. un cierre marcado *(RESCATE DE POS/...)*). Cada sesión es la "
+                "misma persona y el mismo efectivo repartido: el faltante de una caja "
+                "se compensa con el **sobrante** (depósito de más) de otra. Esta utilidad "
+                "agrupa por **cajero + tienda + fecha del número POS**, calcula el **neto** "
+                "(Σ efectivo − Σ depósito) y deja como pendiente **solo el neto**: si las "
+                "sesiones cuadran entre sí, cierra los faltantes por sesión y no queda nada "
+                "que reponer. No mezcla días distintos aunque vengan en el mismo reporte."
+            )
+            if st.button(
+                "⚖️ Netear cierres multi-sesión del mismo cajero",
+                key="repair_multisesion",
+                use_container_width=True,
+            ):
+                try:
+                    res = cash_history.repair_multisession_internal_diffs(
+                        user_email=current_user["email"]
+                    )
+                    if res["groups_fixed"] == 0:
+                        st.info(
+                            "✓ No se encontraron cierres multi-sesión por netear. "
+                            "No hay un cajero con varias cajas el mismo día cuyas "
+                            "diferencias falten compensar."
+                        )
+                    else:
+                        msg = (
+                            f"✅ Netados **{res['groups_fixed']} grupo(s)** de cierres "
+                            f"multi-sesión · {res['pendings_closed']} faltante(s) por "
+                            f"sesión cerrado(s)"
+                        )
+                        if res["residuals_created"] > 0:
+                            msg += f" · {res['residuals_created']} faltante(s) neto(s) creado(s)"
+                        st.success(msg + ".")
+                        with st.expander("Ver detalle del netting", expanded=True):
+                            for d in res["details"]:
+                                net = d["net"]
+                                estado = (
+                                    f"queda faltante neto Q {d['residual']:.2f}"
+                                    if d["residual"] > 0
+                                    else f"cuadra neto (Q {net:.2f}) — nada que reponer"
+                                )
+                                st.markdown(
+                                    f"&nbsp;&nbsp;⚖️ **{d['cashier']}** · {d['store']} · "
+                                    f"{d['date']} — {len(d['pos_refs'])} sesiones, "
+                                    f"{estado}."
+                                )
+                                st.caption(
+                                    "&nbsp;&nbsp;&nbsp;&nbsp;" + " · ".join(d["pos_refs"])
+                                )
+                    cash_history.list_pending.clear()
+                    cash_history.list_history.clear()
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: `{e}`")
+
     if not pending:
         st.markdown(
             '<div class="ce-empty">'
