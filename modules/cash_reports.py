@@ -545,6 +545,10 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
    - Reporta la diferencia interna normalmente en el `cashier_breakdown` (REGLA #5) **Y** la boleta normalmente en `orphan_slips` (REGLA #1).
    - NO fuerces el match tú, NO muevas la boleta a `matched`, NO borres ninguno de los dos y NO inventes boletas (REGLA #0 y #0.5 siguen aplicando). El sistema concilia la reposición automáticamente después de tu análisis cuando el monto coincide de forma inequívoca.
 
+**REGLA #5.6 — VARIOS CIERRES DEL MISMO CAJERO EL MISMO DÍA (cajas múltiples / RESCATE).** A veces Odoo abre varias cajas para el MISMO cajero el MISMO día (p.ej. la caja se traba y se genera un cierre marcado "(RESCATE DE POS/...)"). En ese caso cada cierre es una sesión de la MISMA persona, con el MISMO efectivo físico repartido entre sesiones:
+   - Reporta CADA sesión por separado en `cashier_breakdown` con su `efectivo`, su `deposito` y su `diferencia_interna` = efectivo − depósito. **Incluye el signo**: si en una sesión depositó MÁS de lo que cobró (sobrante), su `diferencia_interna` es NEGATIVA (p.ej. −106.00). Si cobró más de lo que depositó (faltante), es positiva.
+   - NO sumes ni netees las sesiones tú mismo, NO borres ni fusiones cierres. El sistema neta automáticamente todas las sesiones del mismo cajero + tienda + día (la fecha la toma del número POS) después de tu análisis: si los faltantes de unas sesiones se compensan con el sobrante de otra, no queda nada por reponer.
+
 **REGLA #6 — TOTALES MANUALES DE TICKETS DE TARJETAS.** Si en el contexto que te paso encuentras un campo `manual_credomatic_total` o `manual_visanet_total` con un valor > 0, ese es el total real del ticket físico (escrito a mano por el Lic. porque el papel estaba ilegible). En ese caso:
    - Usa ese valor como `ticket_total` en `card_reconciliation`.
    - NO intentes leer el total del ticket de la imagen (el papel térmico está borroso).
