@@ -249,8 +249,8 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
   border-radius: 3px; background: var(--surface); white-space: nowrap; }
 .vb-store-title { font-size: 16px; font-weight: 600; line-height: 1;
   color: var(--ink); letter-spacing: -0.3px; }
-.vb-store-date { font-size: 12.5px; color: var(--ink-3); font-weight: 500;
-  letter-spacing: 0.2px; padding-left: 12px; margin-left: 2px;
+.vb-store-date { font-size: 16px; color: var(--ink); font-weight: 500;
+  letter-spacing: -0.2px; padding-left: 12px; margin-left: 2px;
   border-left: 1px solid var(--border); white-space: nowrap; }
 .vb-store-meta { font-size: 9.5px; color: var(--ink-3); text-transform: uppercase;
   letter-spacing: 1.3px; text-align: right; font-weight: 600; }
@@ -386,7 +386,7 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
   .vb-stat-value { font-size: 28px; }
   .vb-legend { display: flex; }
   .vb-store-head { padding: 15px 20px; }
-  .vb-store-title { font-size: 17px; }
+  .vb-store-title, .vb-store-date { font-size: 17px; }
   .vb-timeline-head, .vb-emp { grid-template-columns: 180px 1fr; min-width: 700px; }
   .vb-emp-info { padding: 13px 16px; }
   .vb-avatar { width: 32px; height: 32px; font-size: 11px; }
@@ -414,7 +414,7 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
   .vb-legend { margin-bottom: 22px; padding: 11px 20px; }
   .vb-store { margin-bottom: 20px; }
   .vb-store-head { padding: 16px 22px; }
-  .vb-store-title { font-size: 18px; }
+  .vb-store-title, .vb-store-date { font-size: 18px; }
   .vb-store-meta strong { font-size: 14px; }
   .vb-store-scroll { overflow-x: visible; }
   .vb-timeline-head, .vb-emp { grid-template-columns: 240px 1fr; min-width: 0; }
