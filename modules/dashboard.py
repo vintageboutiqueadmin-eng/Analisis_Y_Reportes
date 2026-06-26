@@ -43,6 +43,13 @@ def _format_spanish_date(d: dt.date) -> str:
     return f"{wd} {d.day} de {mo}, {d.year}".upper()
 
 
+def _format_store_date(d: dt.date) -> str:
+    """Fecha junto al nombre de la tienda, ej. 'Viernes 26 junio 2026'."""
+    wd = SPANISH_WEEKDAYS[d.weekday()]
+    mo = SPANISH_MONTHS[d.month - 1].lower()
+    return f"{wd} {d.day} {mo} {d.year}"
+
+
 def _now_minutes_for(date: dt.date) -> int | None:
     """Return current minutes-from-midnight if `date` is today (GT time), else None."""
     if date == today_gt():
@@ -253,6 +260,7 @@ def _build_data(date: dt.date) -> dict:
 
     return {
         "date_display": _format_spanish_date(date),
+        "date_label": _format_store_date(date),
         "now_minutes": now_min,
         "stats": stats,
         "stores": stores_out,
