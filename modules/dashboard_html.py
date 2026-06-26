@@ -249,6 +249,9 @@ html, body { font-family: var(--sans); background: var(--bg); color: var(--ink);
   border-radius: 3px; background: var(--surface); white-space: nowrap; }
 .vb-store-title { font-size: 16px; font-weight: 600; line-height: 1;
   color: var(--ink); letter-spacing: -0.3px; }
+.vb-store-date { font-size: 12.5px; color: var(--ink-3); font-weight: 500;
+  letter-spacing: 0.2px; padding-left: 12px; margin-left: 2px;
+  border-left: 1px solid var(--border); white-space: nowrap; }
 .vb-store-meta { font-size: 9.5px; color: var(--ink-3); text-transform: uppercase;
   letter-spacing: 1.3px; text-align: right; font-weight: 600; }
 .vb-store-meta strong { color: var(--ink); font-family: var(--mono); font-size: 13px;
@@ -760,7 +763,7 @@ def render_employee_row(emp, start_h, end_h, now_minutes):
 """
 
 
-def render_store(title, marker, employees, start_h, end_h, now_minutes):
+def render_store(title, marker, employees, start_h, end_h, now_minutes, date_label=""):
     total_min = 0
     for emp in employees:
         if emp.get("status") != "working":
@@ -781,12 +784,15 @@ def render_store(title, marker, employees, start_h, end_h, now_minutes):
     else:
         rows_html = "".join(rows)
 
+    date_html = f'<span class="vb-store-date">{date_label}</span>' if date_label else ''
+
     return f"""
 <div class="vb-store">
   <div class="vb-store-head">
     <div class="vb-store-head-left">
       <span class="vb-store-marker">{marker}</span>
       <div class="vb-store-title">Tienda {title}</div>
+      {date_html}
     </div>
     <div class="vb-store-meta">Horas programadas<strong>{fmt_duration(total_min)}</strong></div>
   </div>
@@ -809,6 +815,7 @@ def render_dashboard_body(data, user_name="Lic. Juan Orozco", user_role="Gerenci
     """Render only the HTML body (no CSS). For use with st.html() so Streamlit
     doesn't try to markdown-parse the content."""
     date_display = data.get("date_display", "")
+    date_label = data.get("date_label", "")
     now_minutes = data.get("now_minutes")
     stats = data.get("stats", {})
     stores = data.get("stores", [])
@@ -824,6 +831,7 @@ def render_dashboard_body(data, user_name="Lic. Juan Orozco", user_role="Gerenci
             start_h=start_h,
             end_h=end_h,
             now_minutes=now_minutes,
+            date_label=date_label,
         )
         for s in stores
     )
