@@ -1925,6 +1925,157 @@ def _render_pending_tab(current_user: dict):
 # Main render
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Tab 5: Buscar boleta
+# ---------------------------------------------------------------------------
+
+def _boleta_digits(s):
+    import re
+    return re.sub(r"\D", "", str(s or ""))
+
+
+def _search_boleta(history, pendings, query):
+    """Busca una boleta por número en el historial y en pendientes.
+    Devuelve coincidencias con día, caja/POS, cajero y tienda."""
+    import json as _json
+    q = str(query or "").strip()
+    qd = _boleta_digits(q)
+
+    def _match(val):
+        v = str(val or "")
+        return (q and q in v) or (qd and qd == _boleta_digits(v))
+
+    results = []
+
+    # Historial (bank_reconciliation)
+    for h in history:
+        data = h.get("json_data") or {}
+        if isinstance(data, str):
+            try:
+                data = _json.loads(data)
+            except Exception:
+                data = {}
+        br = data.get("bank_reconciliation", {}) or {}
+        who = {}
+        for c in (data.get("cashier_breakdown") or []):
+            who[c.get("pos_ref", "")] = (c.get("cashier", ""), c.get("store", ""))
+        estados = {
+            "matched": "Conciliada (cuadró con depósito del POS)",
+            "orphan_slips": "Boleta huérfana (sin depósito del POS)",
+            "missing_slips": "Depósito sin boleta",
+        }
+        for lista in ("matched", "orphan_slips", "missing_slips"):
+            for item in (br.get(lista) or []):
+                cand = (item.get("slip_number") or item.get("number")
+                        or item.get("boleta") or "")
+                if not (_match(cand) or _match(_json.dumps(item, ensure_ascii=False))):
+                    continue
+                pos_ref = item.get("pos_ref", "")
+                cajero, tienda = who.get(pos_ref, ("", ""))
+                results.append({
+                    "origen": "Historial",
+                    "estado": estados.get(lista, lista),
+                    "boleta": cand or q,
+                    "monto": item.get("slip_amount", item.get("amount")),
+                    "fecha_boleta": item.get("slip_date", ""),
+                    "fecha_cierre": str(h.get("report_date", ""))[:10],
+                    "reporte": h.get("id", ""),
+                    "pos_ref": pos_ref,
+                    "cajero": cajero,
+                    "tienda": tienda,
+                })
+
+    # Pendientes (por si quedó como boleta huérfana sin resolver)
+    for p in (pendings or []):
+        det = p.get("details", {}) or {}
+        blob = _json.dumps({**p, "details": det}, ensure_ascii=False, default=str)
+        cand = det.get("slip_number") or det.get("number") or ""
+        if not (_match(cand) or _match(blob)):
+            continue
+        results.append({
+            "origen": "Pendientes",
+            "estado": f"{p.get('type', '')} · {p.get('status', '')}",
+            "boleta": cand or q,
+            "monto": p.get("amount"),
+            "fecha_boleta": det.get("slip_date", ""),
+            "fecha_cierre": str(p.get("origin_date", ""))[:10],
+            "reporte": p.get("origin_report_id", ""),
+            "pos_ref": det.get("pos_ref", ""),
+            "cajero": det.get("cashier", ""),
+            "tienda": det.get("store", ""),
+        })
+
+    return results
+
+
+def _render_boleta_search_tab(history, current_user):
+    st.markdown("### 🧾 Buscar boleta")
+    st.caption(
+        "Escribí el número de boleta del banco y te digo a qué **día** y a qué "
+        "**caja / cajero** pertenece. Busca en todos los cierres del historial y en "
+        "la bandeja de pendientes (por si quedó como boleta huérfana)."
+    )
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        query = st.text_input(
+            "Número de boleta",
+            key="boleta_search_q",
+            placeholder="Ej. 50911097",
+            label_visibility="collapsed",
+        )
+    with c2:
+        go = st.button("🔍 Buscar", use_container_width=True, type="primary")
+
+    if not (go or (query and str(query).strip())):
+        return
+    if not str(query).strip():
+        st.info("Escribí un número de boleta para buscar.")
+        return
+
+    try:
+        pendings = cash_history.list_pending(only_open=False)
+    except Exception:
+        pendings = []
+
+    results = _search_boleta(history, pendings, query)
+
+    if not results:
+        st.warning(
+            f"No encontré la boleta **{query}** en el historial ni en pendientes. "
+            "Puede ser que ese cierre todavía no se haya subido/procesado en la app."
+        )
+        return
+
+    st.success(f"Encontré {len(results)} coincidencia(s) para la boleta {query}:")
+    for r in results:
+        monto = r["monto"]
+        try:
+            monto_txt = f"Q {float(monto):,.2f}"
+        except (TypeError, ValueError):
+            monto_txt = f"Q {monto}"
+        fb = (f" &nbsp;·&nbsp; boleta del {r['fecha_boleta']}"
+              if r["fecha_boleta"] else "")
+        st.markdown(
+            f"""
+            <div style="border:1px solid #E5E7EB;border-left:3px solid #16A34A;
+                        border-radius:6px;padding:14px 16px;margin:8px 0;background:#fff;">
+              <div style="font-size:15px;font-weight:700;color:#0B0F19;">
+                Boleta {r['boleta']} · {monto_txt}</div>
+              <div style="font-size:12px;color:#6B7280;margin-top:2px;">
+                {r['estado']} · en {r['origen']}</div>
+              <div style="height:8px;"></div>
+              <div style="font-size:13.5px;color:#111827;line-height:1.9;">
+                📅 <strong>Día del cierre:</strong> {r['fecha_cierre'] or '—'}{fb}<br>
+                🧾 <strong>Caja / POS:</strong> {r['pos_ref'] or '—'}<br>
+                👤 <strong>Cajero:</strong> {r['cajero'] or '—'} &nbsp;·&nbsp; {r['tienda'] or '—'}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def render(current_user: dict) -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
 
@@ -1952,11 +2103,12 @@ def render(current_user: dict) -> None:
         return
 
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Resumen",
         "📚 Historial",
         "⭐ Clientes VIP",
         "⏳ Pendientes",
+        "🧾 Buscar boleta",
     ])
 
     with tab1:
@@ -1967,3 +2119,5 @@ def render(current_user: dict) -> None:
         _render_vip_tab(history)
     with tab4:
         _render_pending_tab(current_user)
+    with tab5:
+        _render_boleta_search_tab(history, current_user)
