@@ -1215,11 +1215,35 @@ def _render_inline_resolver(p: dict, row_type: str,
         return
 
     # Duplicate check against history
+    override_key = f"dupok_{p['id']}_{ref}"
     if extract["kind"] == "slip":
-        exists, where = cash_history.slip_number_exists_in_history(ref)
+        exists, where, stored_amt = cash_history.slip_number_exists_in_history(ref)
     else:
         exists, where = cash_history.pos_ref_exists_in_history(ref)
-    if exists:
+        stored_amt = 0.0
+    if exists and not st.session_state.get(override_key):
+        # ¿Duplicado real, o re-escaneo de una boleta que quedó guardada sin valor
+        # (o con un monto distinto)? Un mal escaneo capturó solo el número (Q0).
+        mismatch = extract["kind"] == "slip" and (
+            not stored_amt or abs(float(stored_amt) - float(amount or 0)) > 1.0
+        )
+        if mismatch:
+            prev = ("sin valor (Q 0.00)" if not stored_amt
+                    else f"con {_fmt_q(stored_amt)}")
+            st.warning(
+                f"⚠ La boleta `{ref}` ya figura en `{where}`, pero quedó registrada "
+                f"**{prev}** — parece que antes se escaneó mal (solo el número). "
+                f"Este escaneo dice **{_fmt_q(amount)}**. Podés usarlo para cuadrar "
+                f"el pendiente."
+            )
+            if st.button(
+                "✓ Usar este escaneo para corregir la boleta",
+                key=f"btn_{override_key}", type="primary",
+                use_container_width=True,
+            ):
+                st.session_state[override_key] = True
+                st.rerun()
+            return
         st.error(
             f"🚫 **Este documento ya está registrado en el historial.** "
             f"`{ref}` ya existe en `{where}`. No se puede usar de nuevo."
