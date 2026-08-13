@@ -219,6 +219,7 @@ def build_processed_catalog() -> dict:
     """
     pos_refs = {}
     bank_slips = {}
+    bank_slip_amounts = {}
     tickets = {}
 
     for h in list_history():
@@ -237,10 +238,12 @@ def build_processed_catalog() -> dict:
             sn = (m.get("slip_number") or "").strip()
             if sn and sn not in bank_slips:
                 bank_slips[sn] = rid
+                bank_slip_amounts[sn] = _safe_float(m.get("slip_amount"))
         for o in (bank.get("orphan_slips") or []):
             sn = (o.get("slip_number") or "").strip()
             if sn and sn not in bank_slips:
                 bank_slips[sn] = rid
+                bank_slip_amounts[sn] = _safe_float(o.get("slip_amount"))
 
         # NEONET / Credomatic tickets: from card_reconciliation
         card = data.get("card_reconciliation") or {}
@@ -254,6 +257,7 @@ def build_processed_catalog() -> dict:
     return {
         "pos_refs": pos_refs,
         "bank_slips": bank_slips,
+        "bank_slip_amounts": bank_slip_amounts,
         "tickets": tickets,
     }
 
@@ -2025,19 +2029,23 @@ def create_partial_remainder_pending(original_pending: dict, remainder_amount: f
     )
 
 
-def slip_number_exists_in_history(slip_number: str) -> tuple[bool, str]:
+def slip_number_exists_in_history(slip_number: str) -> tuple[bool, str, float]:
     """
-    Check if a J No. is already registered somewhere. Returns (exists, report_id_or_pending_id).
+    Check if a J No. is already registered somewhere.
+    Returns (exists, report_id_or_pending_id, stored_amount).
+    stored_amount is what was recorded for that slip (0.0 if unknown / scanned
+    without its value — i.e. a bad scan).
     """
     sn = (slip_number or "").strip()
     if not sn:
-        return False, ""
+        return False, "", 0.0
 
     # Check in cierres_historicos via catalog
     try:
         catalog = build_processed_catalog()
         if sn in catalog.get("bank_slips", {}):
-            return True, catalog["bank_slips"][sn]
+            amt = _safe_float(catalog.get("bank_slip_amounts", {}).get(sn))
+            return True, catalog["bank_slips"][sn], amt
     except Exception:
         pass
 
@@ -2047,11 +2055,11 @@ def slip_number_exists_in_history(slip_number: str) -> tuple[bool, str]:
         for p in all_p:
             d = p.get("details", {}) or {}
             if d.get("slip_number") == sn:
-                return True, p["id"]
+                return True, p["id"], _safe_float(d.get("slip_amount") or p.get("amount"))
     except Exception:
         pass
 
-    return False, ""
+    return False, "", 0.0
 
 
 def pos_ref_exists_in_history(pos_ref: str) -> tuple[bool, str]:
