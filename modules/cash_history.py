@@ -561,6 +561,51 @@ def mark_pending_resolved(pending_id: str, resolved_in_report_id: str) -> bool:
     return False
 
 
+def adjust_pending_amount(pending_id: str, new_amount: float, reason: str,
+                          user_email: str) -> dict:
+    """
+    Corrige el MONTO de un pendiente (típicamente un faltante interno que en
+    realidad es mayor: p.ej. el cajero infló el POS con una venta de tarjeta
+    falsa, y ese monto se le suma al faltante real). Guarda auditoría del monto
+    anterior, el motivo y quién lo hizo. Devuelve {ok, old, new}.
+    """
+    ws = _ensure_pending_tab()
+    all_values = ws.get_all_values()
+    if not all_values:
+        return {"ok": False}
+    headers = all_values[0]
+    col_idx = {h: i for i, h in enumerate(headers)}
+    for i, row in enumerate(all_values[1:], start=2):
+        if row and row[0].strip() == pending_id:
+            old_amount = _safe_float(row[col_idx["amount"]]) if "amount" in col_idx else 0.0
+            new_amt = round(float(new_amount), 2)
+            now_iso = dt.datetime.now(GT_TZ).isoformat(timespec="seconds")
+            ws.update_cell(i, col_idx["amount"] + 1, f"{new_amt:.2f}")
+            details = {}
+            try:
+                raw = row[col_idx["details_json"]] if "details_json" in col_idx else ""
+                if raw:
+                    details = json.loads(raw)
+            except Exception:
+                details = {}
+            adjustments = details.get("amount_adjustments") or []
+            adjustments.append({
+                "from": old_amount, "to": new_amt,
+                "reason": reason, "by": user_email, "at": now_iso,
+            })
+            details["amount_adjustments"] = adjustments
+            prev_note = details.get("note", "")
+            tag = (f"[Monto corregido de Q{old_amount:.2f} a Q{new_amt:.2f} por "
+                   f"{user_email}: {reason}]")
+            details["note"] = (prev_note + " " + tag).strip() if prev_note else tag
+            if "details_json" in col_idx:
+                ws.update_cell(i, col_idx["details_json"] + 1,
+                               json.dumps(details, ensure_ascii=False))
+            list_pending.clear()
+            return {"ok": True, "old": old_amount, "new": new_amt}
+    return {"ok": False}
+
+
 def delete_pending(pending_id: str) -> bool:
     ws = _ensure_pending_tab()
     all_values = ws.get_all_values()
