@@ -555,6 +555,11 @@ ANALYSIS_PROMPT = """Eres un experto en conciliación contable de tiendas minori
    - Concilia el `pos_total` contra ese `ticket_total` manual.
    - En `note` indica: "Total del ticket ingresado manualmente por usuario debido a papel ilegible".
 
+**REGLA #6.5 — NOTA / ACLARACIÓN DEL LIC. O ADMIN (CONTEXTO AUTORITATIVO).** Si en el contexto encuentras un bloque titulado "NOTA / ACLARACIÓN DEL LIC. O ADMIN", esa es información del mundo real que una persona de confianza escribió sobre este cierre y que tú NO puedes deducir de los documentos (p.ej. "el cajero registró en el POS una venta de tarjeta de Q30 que no ocurrió"). Trátala como AUTORITATIVA:
+   - Si la nota EXPLICA una diferencia, NO la reportes como anomalía a "verificar físicamente". Deja un finding con severidad `ok` o `info` que documente la causa citando la aclaración, y en el `note` del lado correspondiente de `card_reconciliation` explica que la diferencia queda explicada por la nota del Lic.
+   - Si la nota dice que el POS quedó inflado/alterado por el cajero, considera CORRECTO el total de los tickets/documentos físicos; la diferencia es un error del cajero (déjalo dicho), no un ticket faltante ni un mal escaneo.
+   - NO inventes nada más allá de lo que dice la nota. Si la nota no cubre toda la diferencia, reporta el resto normalmente.
+
 ## Tu análisis debe producir
 
 A) **Totales** (excluyendo duplicados, contando una sola vez):
@@ -777,9 +782,34 @@ def _resize_image_if_needed(data: bytes, mime: str, filename: str) -> tuple[byte
 def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
                               catalog: dict, pending: list,
                               manual_credomatic: float = 0.0,
-                              manual_visanet: float = 0.0) -> list:
+                              manual_visanet: float = 0.0,
+                              ia_note: str = "") -> list:
     """Build the content blocks for the Anthropic API call."""
     blocks = []
+
+    # Nota / aclaración del Lic. o admin (contexto del mundo real que la IA no
+    # puede saber sola: p.ej. "el cajero registró una venta de tarjeta que no ocurrió").
+    if (ia_note or "").strip():
+        note_text = (
+            "=== NOTA / ACLARACIÓN DEL LIC. O ADMIN (CONTEXTO AUTORITATIVO) ===\n"
+            "Una persona de confianza (el Lic. o el admin) escribió esta aclaración "
+            "sobre este cierre. Es información del mundo real que tú NO puedes deducir "
+            "de los documentos. Trátala como AUTORITATIVA y aplícala a la conciliación:\n\n"
+            f"  \"{ia_note.strip()}\"\n\n"
+            "Cómo usarla:\n"
+            "- Si la nota EXPLICA una diferencia (p.ej. el cajero registró en el POS una "
+            "venta de tarjeta/efectivo que no ocurrió, o al revés), NO la reportes como "
+            "una anomalía a 'verificar físicamente'. En su lugar, deja un finding con "
+            "severidad 'ok' o 'info' que documente la causa citando la aclaración, y en "
+            "el lado correspondiente de `card_reconciliation.note` explica que la "
+            "diferencia queda explicada por la nota del Lic.\n"
+            "- Considera como CORRECTO el total de los tickets/documentos físicos; si la "
+            "nota dice que el POS está inflado o alterado por el cajero, la diferencia es "
+            "un error del cajero (déjalo dicho), no un ticket faltante ni un mal escaneo.\n"
+            "- NO inventes nada más allá de lo que dice la nota. Si la nota no cubre toda "
+            "la diferencia, reporta el resto normalmente.\n"
+        )
+        blocks.append({"type": "text", "text": note_text})
 
     # Manual ticket totals override (when papel térmico is illegible)
     if manual_credomatic > 0 or manual_visanet > 0:
@@ -960,7 +990,8 @@ def _build_anthropic_content(pdfs: list, neonet: list, boletas: list,
 def _call_claude(pdfs: list, neonet: list, boletas: list,
                  catalog: dict, pending: list,
                  manual_credomatic: float = 0.0,
-                 manual_visanet: float = 0.0) -> dict:
+                 manual_visanet: float = 0.0,
+                 ia_note: str = "") -> dict:
     """Call Claude Opus 4.7 with all uploaded files + historical context."""
     import anthropic
 
@@ -971,6 +1002,7 @@ def _call_claude(pdfs: list, neonet: list, boletas: list,
         pdfs, neonet, boletas, catalog, pending,
         manual_credomatic=manual_credomatic,
         manual_visanet=manual_visanet,
+        ia_note=ia_note,
     )
 
     # 16000 tokens covers ~12-15 cashier closings plus all the bank reconciliation
@@ -2222,6 +2254,29 @@ def render(current_user: dict) -> None:
     st.markdown('</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # ===== Nota / aclaración libre para la IA =====
+    st.markdown('<div class="cc-section">', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:13px;font-weight:600;color:#0B0F19;margin-bottom:4px;">'
+        '📝 Nota / aclaración para la IA (opcional)</div>'
+        '<div style="font-size:11.5px;color:#6C7280;line-height:1.5;margin-bottom:10px;">'
+        'Si sabés algo que la IA no puede adivinar de los documentos, escríbelo aquí y lo '
+        'toma en cuenta al conciliar. Ej.: <em>"En la 7a el cajero registró en el POS una '
+        'venta de tarjeta de Q30 que no existió; los tickets físicos son los correctos."</em> '
+        'Así la IA deja la diferencia documentada como error del cajero y no como algo por verificar.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.text_area(
+        "Nota para la IA",
+        value=str(st.session_state.get("cc_ia_note", "")),
+        key="cc_ia_note",
+        height=90,
+        placeholder="Escribe aquí cualquier aclaración sobre este cierre… (opcional)",
+        label_visibility="collapsed",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
     st.markdown('<div class="cc-section">', unsafe_allow_html=True)
     _render_section_photos(
         "cc_boletas", 3, "Boletas de Banco / Depósitos",
@@ -2285,11 +2340,14 @@ def render(current_user: dict) -> None:
                     # Read manual ticket totals (override if illegible papers)
                     m_credomatic = float(st.session_state.get("cc_manual_credomatic", 0.0))
                     m_visanet = float(st.session_state.get("cc_manual_visanet", 0.0))
+                    # Nota/aclaración libre del Lic. o admin (contexto para la IA)
+                    ia_note = str(st.session_state.get("cc_ia_note", "") or "")
                     # Call Claude with full context
                     report = _call_claude(
                         pdfs, neonet, boletas, catalog, pending,
                         manual_credomatic=m_credomatic,
                         manual_visanet=m_visanet,
+                        ia_note=ia_note,
                     )
                     st.session_state.cc_last_report = report
                 except Exception as e:
