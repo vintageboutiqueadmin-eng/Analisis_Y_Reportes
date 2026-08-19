@@ -807,6 +807,9 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
         # Two options: attach slip OR manual mark as repaid
         with st.expander("📎 Resolver este faltante", expanded=False):
             _render_internal_diff_resolver(p, current_user)
+        # Corregir el monto del faltante (cuando el real es distinto al detectado)
+        with st.expander("✏️ Corregir monto del faltante", expanded=False):
+            _render_amount_adjuster(p, current_user)
     else:
         label = (
             "📎 Adjuntar PDF de cierre del POS para resolver"
@@ -828,6 +831,59 @@ def _render_pending_row(p: dict, current_user: dict, row_type: str,
     # Compensation expander — always available as a manual override
     with st.expander("⚖️ Compensación manual (sin documento)", expanded=False):
         _render_compensation_form(p, current_user)
+
+
+def _render_amount_adjuster(p: dict, current_user: dict) -> None:
+    """Corrige el monto de un faltante cuando el real es distinto al detectado
+    por la IA (p.ej. el cajero infló el POS con una venta falsa y debe más)."""
+    st.caption(
+        "Usá esto cuando el faltante **real** es distinto al que detectó la IA. "
+        "Ejemplo: el cajero registró en el POS una venta con tarjeta que no existió "
+        "para tapar efectivo — ese monto **se le suma** al faltante. La IA no puede "
+        "saber eso sola. Queda registrado quién lo corrigió, cuándo y por qué."
+    )
+    cur = _safe_float(p.get("amount"))
+    c1, c2 = st.columns(2)
+    with c1:
+        new_amt = st.number_input(
+            "Monto real del faltante (Q)",
+            min_value=0.0, step=0.01, format="%.2f",
+            value=float(cur), key=f"adj_amt_{p['id']}",
+        )
+    with c2:
+        st.markdown(
+            f"<div style='padding-top:6px;font-size:12px;color:#6B7280;'>"
+            f"Detectado por la IA: <strong>{_fmt_q(cur)}</strong></div>",
+            unsafe_allow_html=True,
+        )
+    reason = st.text_input(
+        "Motivo de la corrección (obligatorio)",
+        key=f"adj_rsn_{p['id']}",
+        placeholder="Ej. cajero registró Q30 de tarjeta falsa que no existió; faltante real Q49.50",
+    )
+    if st.button("Guardar corrección", key=f"adj_btn_{p['id']}", type="primary"):
+        if not reason.strip():
+            st.error("Escribí el motivo de la corrección.")
+        elif abs(float(new_amt) - float(cur)) < 0.01:
+            st.info("El monto es el mismo — no hay nada que corregir.")
+        else:
+            try:
+                res = cash_history.adjust_pending_amount(
+                    p["id"], float(new_amt), reason.strip(), current_user["email"]
+                )
+                if res.get("ok"):
+                    st.success(
+                        f"✓ Faltante corregido de {_fmt_q(res['old'])} a "
+                        f"{_fmt_q(res['new'])}."
+                    )
+                    cash_history.list_pending.clear()
+                    import time
+                    time.sleep(1.5)
+                    st.rerun()
+                else:
+                    st.error("No se pudo corregir el monto.")
+            except Exception as e:
+                st.error(f"Error: `{e}`")
 
 
 def _render_compensation_form(p: dict, current_user: dict) -> None:
