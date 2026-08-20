@@ -842,7 +842,7 @@ def _render_amount_adjuster(p: dict, current_user: dict) -> None:
         "para tapar efectivo — ese monto **se le suma** al faltante. La IA no puede "
         "saber eso sola. Queda registrado quién lo corrigió, cuándo y por qué."
     )
-    cur = _safe_float(p.get("amount"))
+    cur = float(p.get("amount") or 0)
     c1, c2 = st.columns(2)
     with c1:
         new_amt = st.number_input(
